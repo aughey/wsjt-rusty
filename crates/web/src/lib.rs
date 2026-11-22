@@ -1,6 +1,7 @@
 //! Browser-only Leptos shell. Capture and presentation belong here, outside DSP crates.
 
 pub mod annotations;
+pub mod message_kind;
 pub mod receiver;
 pub mod spectrum;
 

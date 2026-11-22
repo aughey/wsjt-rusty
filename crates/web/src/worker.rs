@@ -2,13 +2,30 @@ use crate::receiver::Receiver;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = self, js_name = postMessage)]
+    fn post_message(message: &JsValue);
+}
+
+fn report_decode_activity(active: bool) {
+    let event = js_sys::Object::new();
+    let kind = if active {
+        "decode-started"
+    } else {
+        "decode-completed"
+    };
+    js_sys::Reflect::set(&event, &"kind".into(), &kind.into()).expect("plain event object");
+    post_message(&event);
+}
+
+#[wasm_bindgen]
 pub struct DecoderEngine(Receiver);
 
 #[wasm_bindgen]
 impl DecoderEngine {
     #[wasm_bindgen(constructor)]
     pub fn new(rate: u32, start_utc_ms: f64) -> Result<DecoderEngine, JsValue> {
-        Receiver::new(rate, start_utc_ms)
+        Receiver::with_decode_activity(rate, start_utc_ms, report_decode_activity)
             .map(Self)
             .map_err(|e| JsValue::from_str(&e))
     }

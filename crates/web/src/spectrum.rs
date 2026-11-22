@@ -117,14 +117,14 @@ impl Spectrum {
     }
 }
 
-/// Cool navy → blue → cyan → white without warm highlights.
+/// Dark navy background with green/yellow signals and pale yellow peaks.
 pub fn color(db: f32, floor: f32) -> [u8; 4] {
     const STOPS: [[f32; 3]; 5] = [
         [11.0, 19.0, 37.0],
-        [23.0, 59.0, 115.0],
-        [22.0, 143.0, 187.0],
-        [96.0, 217.0, 221.0],
-        [231.0, 252.0, 255.0],
+        [25.0, 67.0, 80.0],
+        [126.0, 157.0, 51.0],
+        [241.0, 210.0, 58.0],
+        [255.0, 250.0, 207.0],
     ];
     let position = ((db - floor) / DISPLAY_RANGE_DB).clamp(0.0, 1.0) * 4.0;
     let i = (position.floor() as usize).min(3);

@@ -45,7 +45,13 @@ subtraction DT refinement remain unported. The current shared framework also sup
 README. The browser application now captures and decodes live FT8 using these same
 adapters; its transport, sample-clock/UTC mapping and buffering limits are
 documented in the main README. No FT8 algorithm or upstream source bytes changed
-for browser integration. There is no transmitter, native sound-card driver or
+for browser integration. The browser additionally schedules a non-consuming
+attempt on the latest 16 seconds at UTC slot +13.5 seconds, sharing the same
+message context and overlap deduplication as the regular recovery windows.
+This assumes an approximately synchronized computer/radio clock for early
+results; off-clock signals still have the original 30-second recovery windows.
+No sensitivity or real-time completion guarantee is implied by the early attempt.
+There is no transmitter, native sound-card driver or
 network server.
 
 The port now lives in the independent `wsjt-ft8` workspace crate. The shared

@@ -104,9 +104,12 @@ the browser; the capture graph outputs silence to avoid speaker feedback.
 
 The FFT waterfall and waveform remain live while a dedicated worker runs the existing Rust
 `Ft8Decoder` through `AudioStream`: 100–4000 audio Hz, two passes, 30-second
-windows and 15-second hops. First results arrive after 30 seconds plus processing
-time; subsequent attempts occur every 15 seconds. Arbitrary capture offsets are
-supported; starting exactly on a UTC slot boundary is unnecessary. **Stop**
+windows and 15-second hops for recovery. An additional early attempt uses the
+latest 16 seconds at **13.5 seconds into each UTC slot**, shortly after the nominal
+transmission ends. Quarter-second transport chunks limit delivery delay. Results
+can arrive before the next slot when processing finishes in time; slower devices
+may still lag, and early attempts add processing work. Arbitrary capture offsets
+are supported; starting exactly on a UTC slot boundary is unnecessary. **Stop**
 releases the input and flushes a final partial window (at least 13 seconds for
 an FT8 attempt), retaining overlap deduplication and message-hash context.
 Starting again creates a new session and clears the displayed messages.
@@ -121,7 +124,7 @@ remain visible. The optional input waveform is under the waterfall.
 
 **Auto level** starts enabled: a smoothed median of the passband estimates the
 background, keeping ordinary noise dark rather than saturating the waterfall.
-The palette uses cool navy/blue/cyan/white. Turn Auto level off to adjust
+The palette moves from dark navy through green to yellow and pale yellow highlights. Turn Auto level off to adjust
 **New-row floor** manually. The color scale spans 50 dB above that floor and applies to newly drawn rows;
 existing history retains its colors. Levels are coherent-gain-normalized FFT
 bin amplitudes in dBFS, not decoder SNR or calibrated RF power. A bin-centered
@@ -136,6 +139,19 @@ to see the message, SNR, audio frequency and UTC times. Boxes follow the audio
 clock and the FFT window center, not decode arrival time or subsequent changes
 to the computer clock. They clip to visible capture history/passband edges,
 age off after 60 seconds, and remain visible for final results after Stop.
+Outline colors and small symbol badges distinguish CQ/calling (green ◉),
+reply/locator (cyan ◇), signal report (amber +), R-report (purple R), RRR
+(blue ✓), 73/RR73 (pink ✦), and other messages (gray ·). A legend appears below
+the waterfall and the hover details include the category. These are presentation
+labels derived from standard/nonstandard callsign payloads and message content,
+not inferred QSO state. Free text, telemetry and specialized contest forms stay
+Other even if their text contains CQ or 73.
+
+A yellow **Decoding FT8…** indicator and spinner appear while the worker is
+actually running a decode attempt, including early attempts, recovery windows
+and the final Stop flush. It retains the latest attempt's start time and shows
+when the attempt completes, even if no messages were found. Capture and display
+continue independently while decoding runs.
 
 The page shows its computer clock in UTC, the first and last processed sample
 UTC times, processing lag, and up to 500 recent decodes. Each row includes UTC
@@ -153,7 +169,7 @@ stops capture if the audio clock suspends or the input disappears, rather than
 joining disconnected audio under misleading timestamps. Keep the tab active;
 browser throttling, device changes and host load can interrupt live operation.
 
-An AudioWorklet copies consecutive mono PCM into one-second chunks, with a
+An AudioWorklet copies consecutive mono PCM into quarter-second chunks, with a
 partial chunk flushed on Stop. Transport-only JavaScript connects it directly
 to the worker using a MessageChannel. Rust's shared stateful windowed-sinc
 resampler retains history and fractional phase across chunks and normalizes the

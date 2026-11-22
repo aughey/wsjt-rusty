@@ -254,6 +254,27 @@ impl AudioStream {
         sort(&mut results);
         Ok(results)
     }
+    /// Attempt the most recent audio without advancing normal overlap windows.
+    /// Callers may schedule an early attempt using their own clock. Results share
+    /// decoder context and deduplication with normal windows and the final flush.
+    /// Workers with less than their minimum length are skipped.
+    pub fn decode_pending(&mut self, maximum_samples: usize) -> Vec<Decode> {
+        if self.finished {
+            return Vec::new();
+        }
+        let mut results = Vec::new();
+        for worker in &mut self.workers {
+            let length = worker.buffer.len().min(maximum_samples);
+            if length >= worker.decoder.minimum_samples() {
+                let offset = worker.buffer.len() - length;
+                let decoded = worker.decoder.decode(&worker.buffer[offset..]);
+                worker.collect_at(decoded, offset, &mut results);
+            }
+        }
+        sort(&mut results);
+        results
+    }
+
     /// Flush a final partial window once; repeated calls are harmless.
     pub fn finish(&mut self) -> Vec<Decode> {
         if self.finished {
@@ -274,11 +295,15 @@ impl AudioStream {
 }
 impl Worker {
     fn collect(&mut self, decoded: Vec<Decode>, output: &mut Vec<Decode>) {
-        let origin = self.origin as f64 / SAMPLE_RATE as f64;
+        self.collect_at(decoded, 0, output);
+    }
+    fn collect_at(&mut self, decoded: Vec<Decode>, offset: usize, output: &mut Vec<Decode>) {
+        let retained_origin = self.origin as f64 / SAMPLE_RATE as f64;
+        let origin = retained_origin + offset as f64 / SAMPLE_RATE as f64;
         while self
             .recent
             .front()
-            .is_some_and(|r| r.start_seconds < origin - 10.0)
+            .is_some_and(|r| r.start_seconds < retained_origin - 10.0)
         {
             self.recent.pop_front();
         }
@@ -365,6 +390,25 @@ mod tests {
         assert!(stream.finish().is_empty());
         assert!(stream.push(&[0.0]).is_err());
     }
+    #[test]
+    fn early_attempt_retains_audio_context_origins_and_deduplication() {
+        let mut stream = AudioStream::new(vec![Box::new(MarkerDecoder)]).unwrap();
+        let mut audio = vec![0.0; 18000];
+        audio[9000] = 100.0;
+        audio[17000] = 200.0;
+        assert!(stream.push(&audio).unwrap().is_empty());
+        assert!(stream.decode_pending(100).is_empty());
+        let early = stream.decode_pending(12000);
+        assert_eq!(early.len(), 2);
+        assert_eq!(early[0].start_seconds, 0.75);
+        assert!((early[1].start_seconds - 17000.0 / 12000.0).abs() < 1e-10);
+        assert_eq!(stream.workers[0].buffer.len(), audio.len());
+        assert!(stream.decode_pending(12000).is_empty());
+        assert!(stream.push(&vec![0.0; 12000]).unwrap().is_empty());
+        assert!(stream.finish().is_empty());
+        assert!(stream.decode_pending(12000).is_empty());
+    }
+
     #[test]
     fn invalid_audio_and_settings_are_rejected() {
         let mut stream = AudioStream::new(vec![Box::new(MarkerDecoder)]).unwrap();

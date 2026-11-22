@@ -34,10 +34,10 @@ test('continuous samples and final partial chunk retain absolute audio frame pos
   for (let i = 0; i < 100; i++) c.block();
   c.stop();
   const samples = c.chunks.filter(e => e.kind === 'samples');
-  assert.equal(samples.length, 2);
+  assert.equal(samples.length, 5);
   assert.equal(samples[0].frame, 123456);
-  assert.equal(samples[1].frame, 123456 + 12000);
-  assert.equal(samples[0].samples.length + samples[1].samples.length, 12800);
+  assert.equal(samples[1].frame, 123456 + 3000);
+  assert.equal(samples.reduce((n, e) => n + e.samples.length, 0), 12800);
   assert.ok(samples.every(e => e.samples.every(x => x === 0.25)));
   assert.equal(c.chunks.at(-1).kind, 'finish');
   c.stop();
@@ -47,7 +47,7 @@ test('continuous samples and final partial chunk retain absolute audio frame pos
 test('overrun stops with an explicit error and never queues more than 60 seconds', () => {
   const c = capture();
   for (let i = 0; i < 62 * 12000 / 128; i++) c.block();
-  assert.equal(c.chunks.filter(e => e.kind === 'samples').length, 60);
+  assert.equal(c.chunks.filter(e => e.kind === 'samples').length, 240);
   assert.match(c.chunks.at(-1).error, /behind/);
   assert.match(c.events.at(-1).error, /behind/);
 });
@@ -57,7 +57,7 @@ test('Stop with a full queue reports the unsent tail instead of silently losing 
   for (let i = 0; i < 60 * 12000 / 128; i++) c.block();
   c.block();
   c.stop();
-  assert.equal(c.chunks.filter(e => e.kind === 'samples').length, 60);
+  assert.equal(c.chunks.filter(e => e.kind === 'samples').length, 240);
   assert.match(c.chunks.at(-1).error, /final chunk/);
 });
 
@@ -70,7 +70,7 @@ test('returned credits allow sustained capture without increasing the buffer lim
     if (sent > acknowledged) { c.sink.onmessage({ data: { kind: 'credit' } }); acknowledged = sent; }
   }
   c.stop();
-  assert.equal(c.chunks.filter(e => e.kind === 'samples').length, 120);
+  assert.equal(c.chunks.filter(e => e.kind === 'samples').length, 480);
   assert.equal(c.chunks.at(-1).error, null);
 });
 

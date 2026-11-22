@@ -44,8 +44,8 @@ all dependency versions, features and local crate paths in the root
 Keep the single root `Cargo.lock` and shared `target/` directory.
 
 - `wsjt-dsp` (`crates/dsp`): reusable signal processing, currently windowed-sinc
-  downsampling to any equal or lower nonzero sample rate. No protocol or file I/O
-  dependencies.
+  downsampling to any equal or lower nonzero sample rate, with batch and stateful
+  streaming APIs. No protocol or file I/O dependencies.
 - `wsjt-audio` (`crates/audio`): WAV I/O and channel averaging, using `wsjt-dsp`
   for normalization to 12 kHz. No decoder or CLI dependency.
 - `wsjt-ft8` (`crates/ft8`): FT8 DSP, LDPC/CRC, messages and waveforms.
@@ -65,12 +65,17 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
   Resample continuous PCM with `wsjt-dsp::StreamingDownsampler`; analyser snapshots
   are visualization-only. Bound transport to 60 seconds; fail explicitly on
   overrun/discontinuity. Stop releases input and flushes the decoder.
+  Early browser attempts use `AudioStream::decode_pending` on the latest 16
+  seconds at UTC slot +13.5 s; regular 30-second recovery windows stay active.
+  Transport chunks are quarter-second; the queue still holds at most 60 seconds.
   Keep capture/UI dependencies here, outside the processing libraries.
   `spectrum.rs` performs visualization FFTs with RustFFT; `waterfall.rs` owns
   bounded canvas history. `annotations.rs` clips decode boxes to the passband
   and history using the same audio-clock epoch and FFT window centers. Display
   snapshots and automatic color leveling do not feed or alter decoder PCM. The
   waterfall range follows FT8's default settings, with 60 seconds at 10 rows/s.
+  `message_kind.rs` owns presentation categories, outline colors and symbol
+  badges; keep the legend and hover details consistent with this mapping.
 
 Protocol crates are usable independently and must not depend on the framework,
 CLI, or audio-file loader. Share equivalent DSP through `wsjt-dsp`; keep distinct
@@ -118,6 +123,13 @@ PCM16LE stdin -> CLI conversion to normalized mono f32 -------+
 | `crates/wspr/src/fano.rs` | WSPR K=32 rate-1/2 convolutional code, bit-reversal interleaver and bounded Fano sequential decoder. |
 | `crates/wspr/src/message.rs` | WSPR message types 1–3, grid/power unpacking and its 15-bit lookup3 callsign hash. |
 | `crates/wspr/src/tables.rs` | Upstream WSPR synchronization sequence and simulated metric table. Decimal table values must remain exact. |
+| `crates/web/src/lib.rs`, `crates/web/src/app.rs` | Browser WASM entry point and Leptos UI, capture lifecycle, decode list, annotation overlays and accessible hover/focus details. The same WASM module also loads in a worker; only mount the UI when a browser window exists. |
+| `crates/web/src/audio.rs`, `crates/web/src/capture-runtime.js`, `crates/web/capture-worklet.js` | Browser transport ownership, microphone capture, cancellation and continuous mono PCM delivery. JavaScript handles transport/resource lifecycle; keep receive DSP in Rust. |
+| `crates/web/decoder-worker.js`, `crates/web/src/worker.rs` | Worker transport and WASM bindings around the Rust receiver. Return queue credits only after processing a chunk. |
+| `crates/web/src/receiver.rs` | Browser session wrapper over `StreamingDownsampler` and the shared FT8 `AudioStream`; validates continuity and adds UTC timestamps without changing the common decoder envelope. |
+| `crates/web/src/spectrum.rs`, `crates/web/src/waterfall.rs` | RustFFT/Hann visualization, automatic background leveling, yellow-highlight color palette and bounded scrolling canvas. Display processing never modifies decoder PCM. |
+| `crates/web/src/annotations.rs` | Nominal FT8 time/frequency rectangles, clipped to the passband and captured history using FFT row-center timestamps. |
+| `crates/web/src/message_kind.rs` | Presentation-only message classification, colors and icons. Classification is not QSO tracking or a replacement for protocol message unpacking. |
 | `crates/decoder/tests/decoder.rs` | FT8, error-correction, waveform and partial-frame regressions. |
 | `crates/audio/tests/read.rs` | WAV channel averaging and resampling/alias rejection regression. |
 | `crates/decoder/tests/wspr.rs` | Independent coding/soft-symbol vectors, real WSPR fixture, unknown timing, mixed protocols, live windows and EOF deduplication. |
@@ -189,6 +201,41 @@ live decoding waits for a full stream window; EOF can trigger an earlier final
 attempt. Choose window/hop sizes for new modes to cover frame boundaries at
 arbitrary recording offsets, with tests demonstrating that coverage.
 
+### Browser receiver contracts
+
+- Keep continuous capture in the AudioWorklet and decoding in the dedicated
+  WASM worker. Analyser snapshots feed only the waveform/waterfall. Preserve
+  streaming resampler history and fractional phase across chunks; never
+  independently resample successive chunks with the batch API.
+- Anchor UTC once from the computer clock and AudioContext clock. Derive
+  subsequent sample times from audio frame counts, not decode arrival or UI
+  animation time. Input latency and clock drift remain uncalibrated. Stop or
+  report discontinuities/suspensions rather than joining audio across a gap.
+- Stop releases microphone input and flushes the partial transport chunk and
+  decoder tail. Cancellation during permission/worker startup must release
+  late-granted tracks; unmount must also abort an in-progress final flush.
+  Preserve bounded transport (60 seconds of PCM) and the 500-row result limit.
+- Annotation geometry uses the decoder's lowest-tone frequency, nominal 50 Hz
+  bandwidth and 12.64-second duration. Position boxes against painted FFT
+  window centers; retain a frozen time reference after Stop so final decodes
+  can still be inspected. Preserve clipping, expiry, hover and keyboard focus.
+- Message outline colors/icons distinguish CQ/calling, reply/locator, signal
+  report, R-report, RRR, 73/RR73 and Other. Check the 77-bit payload type before
+  classifying rendered text: current ordinary exchange labels cover `i3` 1, 2
+  and 4. Free text, telemetry and specialized contest forms remain Other even
+  if their text contains CQ or 73. Do not infer an established QSO state from
+  a single received message. Keep category labels in accessible descriptions.
+- Automatic display leveling estimates the median passband background;
+  manual floor control remains available. The dark navy/green/yellow/pale-yellow scale
+  spans 50 dB and applies to new rows only. Display levels are FFT-bin dBFS,
+  not decoder SNR or RF power. Preserve dark backgrounds without altering DSP.
+- Use release WASM for live operation. Trunk's generated JS/WASM and copied
+  worker/worklet assets must be served together. File hashing is currently
+  disabled because the worker imports the generated module by its stable
+  name; update that import strategy before changing asset naming. Avoid
+  simultaneous builds into a running dev server's `dist`; use an isolated
+  output such as `target/web-preview` for browser QA when needed.
+
 ## Adding another decoder
 
 1. Trace its actual upstream receive path and dependencies. Record source files,
@@ -233,6 +280,15 @@ cargo check -p wsjt-web --target wasm32-unknown-unknown
 cargo clippy -p wsjt-web --target wasm32-unknown-unknown -- -D warnings
 node --test crates/web/tests/capture-worklet.cjs
 ```
+
+For browser changes, also build from `crates/web` with `trunk build --release`.
+Native workspace checks do not compile WASM-only UI code. Check the browser
+with a simulated input or independent FT8 recording, including live emission,
+Stop/restart and input release. When changing visualization/annotations, verify
+frequency/time alignment, scrolling/freeze, hover/focus details, message-type
+colors/icons and responsive layout. Browser checks with a simulated device do
+not establish physical-device timing or sensitivity parity. Do not rely on
+temporary QA scripts in `/tmp` surviving between sessions.
 
 At the FT8/WSPR milestone, all 20 tests passed. The workspace split preserves
 those regressions and adds a general resampler test. Important reference recordings:

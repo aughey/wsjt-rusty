@@ -12,6 +12,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
+use crate::message_kind::{self, MessageKind};
 use crate::waterfall::{self, Waterfall};
 use audio::Capture;
 use wsjt_rusty::decoder::{Mode, Settings};
@@ -150,6 +151,7 @@ struct WorkerUpdate {
     capture_start_ms: f64,
     capture_end_ms: f64,
     received_seconds: f64,
+    next_attempt_utc_ms: f64,
     decodes: Vec<Row>,
 }
 
@@ -195,6 +197,10 @@ pub fn App() -> impl IntoView {
     let (running, set_running) = signal(false);
     let (starting, set_starting) = signal(false);
     let (finishing, set_finishing) = signal(false);
+    let (decoding, set_decoding) = signal(false);
+    let (decode_activity, set_decode_activity) =
+        signal("Waiting for an FT8 decode attempt".to_owned());
+    let (decode_started, set_decode_started) = signal(String::new());
     let (status, set_status) =
         signal("Ready. Start listening to allow microphone access.".to_owned());
     let (rate, set_rate) = signal("—".to_owned());
@@ -262,6 +268,9 @@ pub fn App() -> impl IntoView {
         let monitor = start_monitor.clone();
         let token = Rc::new(audio::Cancellation::new());
         monitor.borrow_mut().pending = Some(token.clone());
+        set_decoding.set(false);
+        set_decode_activity.set("Waiting for an FT8 decode attempt".into());
+        set_decode_started.set(String::new());
         set_rows.set(Vec::new());
         set_hovered.set(None);
         set_waterfall_clock.set(None);
@@ -287,11 +296,7 @@ pub fn App() -> impl IntoView {
             if let Some(update) = event.update {
                 set_capture_start.set(utc(update.capture_start_ms));
                 set_capture_end.set(utc(update.capture_end_ms));
-                let next_attempt = if update.received_seconds < 30.0 {
-                    30.0
-                } else {
-                    ((update.received_seconds / 15.0).floor() + 1.0) * 15.0
-                };
+                let next_attempt = (update.next_attempt_utc_ms - update.capture_end_ms) / 1000.0;
                 let lag = ((js_sys::Date::now() - update.capture_end_ms) / 1000.0).max(0.0);
                 set_progress.set(if event.kind == "finished" {
                     format!(
@@ -300,7 +305,7 @@ pub fn App() -> impl IntoView {
                     )
                 } else {
                     format!(
-                        "{:.1} s processed · {:.1} s behind live · next attempt at {:.0} s",
+                        "{:.1} s processed · {:.1} s behind live · next slot attempt in {:.1} s",
                         update.received_seconds, lag, next_attempt
                     )
                 });
@@ -315,6 +320,15 @@ pub fn App() -> impl IntoView {
                 });
             }
             match event.kind.as_str() {
+                "decode-started" => {
+                    set_decoding.set(true);
+                    set_decode_started.set(utc(js_sys::Date::now()));
+                    set_decode_activity.set("Decoding FT8…".into());
+                }
+                "decode-completed" => {
+                    set_decoding.set(false);
+                    set_decode_activity.set("FT8 decode attempt complete".into());
+                }
                 "flushing" => {
                     set_running.set(false);
                     set_finishing.set(true);
@@ -326,6 +340,10 @@ pub fn App() -> impl IntoView {
                     set_status.set(reason);
                 }
                 "finished" | "error" => {
+                    set_decoding.set(false);
+                    if event.kind == "error" {
+                        set_decode_activity.set("FT8 decoding stopped after an error".into());
+                    }
                     set_running.set(false);
                     set_starting.set(false);
                     set_finishing.set(false);
@@ -365,9 +383,8 @@ pub fn App() -> impl IntoView {
                         capture.sample_rate() / crate::spectrum::FFT_SIZE as f32
                     ));
                     set_rate.set(format!("{:.0} Hz → 12000 Hz", capture.sample_rate()));
-                    set_status.set(
-                        "Listening for FT8 · first attempt after 30 s, then every 15 s".to_owned(),
-                    );
+                    set_status
+                        .set("Listening for FT8 · decoding near each UTC slot end".to_owned());
                     let mut state = monitor.borrow_mut();
                     state.samples = vec![0.0; capture.analyser.fft_size() as usize];
                     state.waterfall = Some(waterfall);
@@ -422,6 +439,14 @@ pub fn App() -> impl IntoView {
                     <button class="secondary" on:click=stop disabled=move || !running.get() && !starting.get()>"Stop"</button>
                 </div>
                 <p class="status" role="status">{move || status.get()}</p>
+                <div class="decode-activity" class:decoding=move || decoding.get()>
+                    <span class="decode-spinner" aria-hidden="true"></span>
+                    <span role="status">{move || decode_activity.get()}</span>
+                    <span class="decode-start-time">{move || {
+                        let started = decode_started.get();
+                        if started.is_empty() { String::new() } else { format!("Started {started}") }
+                    }}</span>
+                </div>
                 <div class="waterfall-caption">
                     <span>{format!("{low_hz:.0}–{high_hz:.0} audio Hz · decoder passband")}</span>
                     <span>"Newest at top · 60 s history"</span>
@@ -450,17 +475,19 @@ pub fn App() -> impl IntoView {
                                     let end = row.end_utc_ms;
                                     let frequency = row.frequency_hz;
                                     let geometry = Signal::derive(move || crate::annotations::bounds(waterfall_clock.get(), low_hz, high_hz, start, end, frequency));
-                                    let description = format!("{} · SNR {:+.1} dB · {:.1} Hz", row.message, row.snr_db, frequency);
+                                    let kind = message_kind::classify(&row.message, &row.payload);
+                                    let description = format!("{} · {} · SNR {:+.1} dB · {:.1} Hz", kind.label(), row.message, row.snr_db, frequency);
                                     let pointer_row = row.clone();
                                     view! {
                                         <button class="decode-box" type="button"
                                             aria-label=description.clone() title=description aria-describedby="decode-tooltip"
                                             hidden=move || geometry.get().is_none()
-                                            style=move || geometry.get().map(|b| format!("left:{}%;top:{}%;width:{}%;height:{}%", b.left, b.top, b.width, b.height)).unwrap_or_default()
+                                            style=move || geometry.get().map(|b| format!("left:{}%;top:{}%;width:{}%;height:{}%;--decode-color:{}", b.left, b.top, b.width, b.height, kind.color())).unwrap_or_default()
                                             on:mouseenter=move |_| set_hovered.set(Some(pointer_row.clone()))
                                             on:mouseleave=move |_| set_hovered.set(None)
                                             on:focus=move |_| set_hovered.set(Some(row.clone()))
                                             on:blur=move |_| set_hovered.set(None)>
+                                            <span class="decode-kind-icon" aria-hidden="true">{kind.icon()}</span>
                                         </button>
                                     }
                                 }
@@ -469,6 +496,9 @@ pub fn App() -> impl IntoView {
                         <Show when=move || hovered.get().is_some_and(|row| crate::annotations::bounds(waterfall_clock.get(), low_hz, high_hz, row.start_utc_ms, row.end_utc_ms, row.frequency_hz).is_some())>
                             <div id="decode-tooltip" class="decode-tooltip" role="tooltip">
                                 {move || hovered.get().map(|row| view! {
+                                    <span class="tooltip-kind" style=format!("color:{}", message_kind::classify(&row.message, &row.payload).color())>
+                                        {format!("{} {}", message_kind::classify(&row.message, &row.payload).icon(), message_kind::classify(&row.message, &row.payload).label())}
+                                    </span>
                                     <strong>{row.message}</strong>
                                     <span>{format!("SNR {:+.1} dB · {:.1} audio Hz", row.snr_db, row.frequency_hz)}</span>
                                     <span>{format!("{} – {}", utc(row.start_utc_ms), utc(row.end_utc_ms))}</span>
@@ -479,6 +509,13 @@ pub fn App() -> impl IntoView {
                     <div class="time-axis" aria-label="Seconds ago">
                         <span>"0 s"</span><span>"15 s"</span><span>"30 s"</span><span>"45 s"</span><span>"60 s"</span>
                     </div>
+                </div>
+                <div class="message-kind-legend" aria-label="Message type colors and icons">
+                    {MessageKind::ALL.into_iter().map(|kind| view! {
+                        <span class="message-kind-key" style=format!("--decode-color:{}", kind.color())>
+                            <span class="legend-kind-icon" aria-hidden="true">{kind.icon()}</span>{kind.label()}
+                        </span>
+                    }).collect_view()}
                 </div>
                 <div class="waterfall-settings">
                     <label class="auto-level"><input type="checkbox" prop:checked=move || automatic.get()
