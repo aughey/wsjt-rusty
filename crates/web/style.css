@@ -233,3 +233,12 @@ button.transmit { background: #ffc2d8; border-color: #ffc2d8; color: #42172b; }
 .log-payload { max-width: 16rem; white-space: normal; overflow-wrap: anywhere; font-size: .7rem; }
 
 .conversation.contacted:hover, .conversation.contacted:focus-visible { opacity: .75; }
+
+button.decode-box.queued { border-width: 3px; }
+button.decode-box.pursued { border-width: 4px; background: color-mix(in srgb, var(--decode-color) 28%, transparent); box-shadow: 0 0 0 1px #fff, 0 0 7px var(--decode-color); }
+.card-sort label { display: inline-flex; align-items: center; gap: .3rem; }
+
+.tx-frequency-marker { position: absolute; top: 0; bottom: 0; border-inline: 2px dashed #68dec8; background: #68dec818; pointer-events: none; z-index: 2; }
+.tx-frequency-marker span { position: absolute; top: 0; left: 0; padding: 2px 4px; white-space: nowrap; color: #fff; background: #153d45; font-size: 11px; }
+
+.tx-frequency-marker.label-right span { left: auto; right: 0; }

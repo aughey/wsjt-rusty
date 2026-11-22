@@ -17,11 +17,13 @@ pub struct Waterfall {
     first_ms: Option<f64>,
     rate: f64,
     scale: LevelScale,
+    occupancy: crate::open_frequency::Occupancy,
 }
 
 pub struct FrameInfo {
     pub clock: (f64, f64),
     pub floor_db: f32,
+    pub open_frequency: Option<f32>,
 }
 
 pub fn clear(canvas: &HtmlCanvasElement, context: &CanvasRenderingContext2d) {
@@ -48,6 +50,7 @@ impl Waterfall {
             first_ms: None,
             rate: rate.into(),
             scale: LevelScale::default(),
+            occupancy: crate::open_frequency::Occupancy::new(low, high, WIDTH as usize),
         })
     }
 
@@ -106,9 +109,11 @@ impl Waterfall {
         // FFT pixels describe the center of the Hann snapshot, not its arrival.
         let latest = audio_ms - FFT_SIZE as f64 / self.rate * 500.0;
         let first = *self.first_ms.get_or_insert(latest);
+        self.occupancy.push(latest, &self.levels);
         Ok(Some(FrameInfo {
             clock: (first, latest),
             floor_db,
+            open_frequency: self.occupancy.best(),
         }))
     }
 }

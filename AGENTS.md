@@ -434,9 +434,13 @@ reduced-motion preferences with a steady active glow.
 Active contact attempts move to the queue front and remain first during explicit
 sorts or Move to front actions on waiting stations; those actions do not cancel
 an exchange. Move to back/remove retain their cancellation behavior. Selecting
-a conversation adds it at the front of the waiting queue. Both lists provide
-one-shot strongest-SNR, CQ-first-state and nearest-distance sorts;
-subsequent activity keeps conversation display cells stable until another sort.
+a conversation adds it at the front of the waiting queue. The station queue has saved sort checkboxes, reapplied each UTC 15-second cycle
+and before choosing a new caller, combining CQ-first state, strongest SNR and
+nearest distance in that order. Four unanswered initial calls apply a three-minute
+sorting penalty behind unpenalized stations; active contacts always stay first.
+Conversations retain one-shot sorts and stable cells until another explicit sort.
+Waterfall decoded-sender boxes thicken for queued stations; the active target
+also gets a translucent category-colored fill and brighter outline.
 `geography.rs` owns validated Maidenhead cell centers and approximate spherical
 kilometer distances, using only decoded ordinary CQ/locator sender evidence.
 Retain latest locations separately from trimmed message history, bounded by
@@ -458,3 +462,11 @@ evidence, without inventing QSL or mutual QSO confirmation. Capture fresh CI-V
 ReadFrequency results (at most five seconds old) from serialized radio polls for
 contact RF dial MHz / ADIF FREQ, preserving the query timestamp. Never use the
 editable frequency form or audio Hz; stale/disconnected readbacks remain unknown.
+
+The saved `find an open frequency` option uses `open_frequency.rs`'s bounded
+60-second raw waterfall spectrum occupancy (independent of display levels).
+`Exchange::transmit_frequency_hz` holds the chosen lowest tone per attempt,
+including retries and partner replies; new attempts choose again. No recent
+spectrum means no new open-frequency attempt. Preserve received frequency/SNR,
+report generation and decode priorities separately. Cards and the dashed cyan
+waterfall band display the actual selected TX footprint.

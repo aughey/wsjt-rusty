@@ -30,6 +30,7 @@ pub struct Station {
     /// Successfully completed initial-call audio while this station is queued.
     pub contact_tries: usize,
     attempted_cq_ms: f64,
+    pub sort_penalty_until_ms: f64,
 }
 impl Station {
     pub fn state(&self, now_ms: f64) -> &str {
@@ -50,6 +51,8 @@ impl Station {
 }
 #[derive(Clone, Debug)]
 pub struct Exchange {
+    /// Chosen once per attempt; RX frequency updates never move this tone.
+    pub transmit_frequency_hz: Option<f32>,
     pub contact: Contact,
     pub record: ContactRecord,
     pub started_ms: f64,
@@ -72,6 +75,12 @@ pub struct Plan {
 pub struct StationQueue {
     pub items: Vec<Station>,
     pub enabled: bool,
+    /// CQ state, strongest signal, then nearest distance; unchecked keys are skipped.
+    pub sort_preferences: [bool; 3],
+    pub find_open_frequency: bool,
+    /// Latest placement from recent spectrum history; absent when unavailable.
+    pub open_frequency_hz: Option<f32>,
+    last_sort_slot: Option<i64>,
     pub active: Option<Exchange>,
     pub pending: Option<Plan>,
     pub log_session: String,
@@ -120,6 +129,33 @@ impl StationQueue {
     }
     pub fn contains(&self, call: &str) -> bool {
         self.items.iter().any(|s| s.call == call)
+    }
+    pub fn marker_status(&self, text: &str, payload: &str) -> (bool, bool) {
+        let kind = classify(text, payload);
+        if kind == MessageKind::Other {
+            return (false, false);
+        }
+        let words: Vec<_> = text.split_whitespace().collect();
+        let sender = if kind == MessageKind::Cq {
+            words
+                .iter()
+                .rev()
+                .find(|w| {
+                    w.chars().any(|c| c.is_ascii_digit())
+                        && w.chars().any(|c| c.is_ascii_alphabetic())
+                        && Location::parse(w).is_none()
+                })
+                .copied()
+        } else {
+            words.get(1).copied()
+        };
+        let sender = sender.unwrap_or("").trim_matches(['<', '>']);
+        (
+            self.contains(sender),
+            self.active
+                .as_ref()
+                .is_some_and(|a| a.contact.target == sender),
+        )
     }
     pub fn was_contacted(&self, call: &str, contacted: &[String]) -> bool {
         contacted.iter().any(|c| c == call)
@@ -206,6 +242,7 @@ impl StationQueue {
             sent_messages: Default::default(),
             contact_tries: 0,
             attempted_cq_ms: f64::NEG_INFINITY,
+            sort_penalty_until_ms: f64::NEG_INFINITY,
         });
     }
     /// Change priority without interrupting an exchange already in progress.
@@ -225,6 +262,24 @@ impl StationQueue {
         }
     }
     pub fn sort(&mut self, by: CardSort, mine: &str) {
+        let keys = match by {
+            CardSort::State => [true, false, false],
+            CardSort::Signal => [false, true, false],
+            CardSort::Distance => [false, false, true],
+        };
+        self.sort_selected(keys, mine, self.observations.now_ms);
+    }
+    pub fn sort_cycle(&mut self, now_ms: f64, mine: &str) {
+        if !now_ms.is_finite() {
+            return;
+        }
+        let slot = (now_ms / SLOT).floor() as i64;
+        if self.last_sort_slot != Some(slot) {
+            self.last_sort_slot = Some(slot);
+            self.sort_selected(self.sort_preferences, mine, now_ms);
+        }
+    }
+    pub fn sort_selected(&mut self, keys: [bool; 3], mine: &str, now_ms: f64) {
         let states: std::collections::BTreeMap<_, _> = self
             .items
             .iter()
@@ -240,20 +295,38 @@ impl StationQueue {
                 (s.call.clone(), rank)
             })
             .collect();
-        self.items.sort_by(|a, b| match by {
-            CardSort::Signal => {
-                let snr = |s: &Station| {
-                    if s.evidence.is_empty() {
-                        f32::NEG_INFINITY
+        self.items.sort_by(|a, b| {
+            let snr = |s: &Station| {
+                if s.evidence.is_empty() {
+                    f32::NEG_INFINITY
+                } else {
+                    s.snr_db
+                }
+            };
+            (a.sort_penalty_until_ms > now_ms)
+                .cmp(&(b.sort_penalty_until_ms > now_ms))
+                .then_with(|| {
+                    if keys[0] {
+                        states[&a.call].cmp(&states[&b.call])
                     } else {
-                        s.snr_db
+                        std::cmp::Ordering::Equal
                     }
-                };
-                snr(b).total_cmp(&snr(a))
-            }
-            CardSort::State => states[&a.call].cmp(&states[&b.call]),
-            CardSort::Distance => distance_key(a.location.as_ref().map(|(_, l)| l), mine)
-                .total_cmp(&distance_key(b.location.as_ref().map(|(_, l)| l), mine)),
+                })
+                .then_with(|| {
+                    if keys[1] {
+                        snr(b).total_cmp(&snr(a))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| {
+                    if keys[2] {
+                        distance_key(a.location.as_ref().map(|(_, l)| l), mine)
+                            .total_cmp(&distance_key(b.location.as_ref().map(|(_, l)| l), mine))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
         });
         self.pin_active();
     }
@@ -351,6 +424,7 @@ impl StationQueue {
         self.stop();
         self.observations = Conversations::default();
         self.recent_logs.clear();
+        self.last_sort_slot = None;
         for s in &mut self.items {
             s.latest_ms = f64::NEG_INFINITY;
             s.location = None;
@@ -363,6 +437,7 @@ impl StationQueue {
             s.waiting_since_ms = None;
             s.sent_messages.fill(None);
             s.contact_tries = 0;
+            s.sort_penalty_until_ms = f64::NEG_INFINITY;
         }
     }
     pub fn hear(
@@ -540,6 +615,9 @@ impl StationQueue {
                         "No response / attempt limit · waiting for a new CQ"
                     }
                     .into();
+                    if unanswered {
+                        s.sort_penalty_until_ms = now_ms + 180_000.0;
+                    }
                     s.attempted_cq_ms = s.latest_ms;
                 }
                 self.end_active(if unanswered {
@@ -554,6 +632,8 @@ impl StationQueue {
             if self.log_pending.len() >= 200 {
                 return None;
             }
+            // Include decodes arriving after the slot boundary before choosing a caller.
+            self.sort_selected(self.sort_preferences, grid, now_ms);
             let station = self.items.iter_mut().find(|s| {
                 let due = ((s.latest_ms / SLOT).round() + 1.0) * SLOT + 500.0;
                 !s.completed
@@ -565,8 +645,17 @@ impl StationQueue {
                     && now_ms >= due - 1800.0
                     && now_ms <= due - 200.0
             })?;
+            let transmit_frequency_hz = if self.find_open_frequency {
+                Some(
+                    self.open_frequency_hz
+                        .filter(|hz| hz.is_finite() && (100.0..=3950.0).contains(hz))?,
+                )
+            } else {
+                None
+            };
             station.attempted_cq_ms = station.latest_ms;
             self.active = Some(Exchange {
+                transmit_frequency_hz,
                 contact: Contact::new(station.call.clone(), station.latest_ms),
                 record: ContactRecord {
                     id: format!(
@@ -622,7 +711,7 @@ impl StationQueue {
             message,
             start_ms: due,
             receive_slot: a.contact.receive_slot,
-            frequency_hz: s.frequency_hz,
+            frequency_hz: a.transmit_frequency_hz.unwrap_or(s.frequency_hz),
             step: a.contact.step,
         };
         self.pending = Some(p.clone());
@@ -692,6 +781,108 @@ mod tests {
             1200.0,
         );
     }
+    #[test]
+    fn open_frequency_is_held_across_retries_replies_and_setting_changes() {
+        let mut q = queue();
+        q.find_open_frequency = true;
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        assert!(q.plan(14000.0, "W9XYZ", "EN37").is_none());
+        assert!(q.active.is_none(), "wait for spectrum without consuming CQ");
+        q.open_frequency_hz = Some(f32::NAN);
+        assert!(q.plan(14000.0, "W9XYZ", "EN37").is_none());
+        q.open_frequency_hz = Some(2100.0);
+        let first = q.plan(14000.0, "W9XYZ", "EN37").unwrap();
+        assert_eq!(first.frequency_hz, 2100.0);
+        q.complete(first.id, true);
+        q.open_frequency_hz = Some(2700.0);
+        let retry = q.plan(44000.0, "W9XYZ", "EN37").unwrap();
+        assert_eq!(retry.frequency_hz, 2100.0);
+        q.complete(retry.id, true);
+        q.find_open_frequency = false;
+        q.hear(
+            "W9XYZ",
+            60500.0,
+            "W9XYZ K1ABC -12",
+            &format!("{}001", "0".repeat(74)),
+            -11.0,
+            3450.0,
+        );
+        let reply = q.plan(74000.0, "W9XYZ", "EN37").unwrap();
+        assert_eq!(reply.frequency_hz, 2100.0);
+        assert!(reply.message.contains("R-11"));
+        q.cancel_active();
+        q.find_open_frequency = true;
+        hear(&mut q, 90500.0, "CQ N0XYZ FN42");
+        let next = q.plan(104000.0, "W9XYZ", "EN37").unwrap();
+        assert_eq!(next.target, "N0XYZ");
+        assert_eq!(
+            next.frequency_hz, 2700.0,
+            "new attempt uses new spectrum choice"
+        );
+    }
+
+    #[test]
+    fn waterfall_marks_only_the_queued_sender_and_active_target() {
+        let mut q = StationQueue::default();
+        q.add("K1ABC".into());
+        let payload = format!("{}001", "0".repeat(74));
+        assert_eq!(q.marker_status("CQ DX K1ABC FN42", &payload), (true, false));
+        assert_eq!(q.marker_status("K1ABC N0XYZ -10", &payload), (false, false));
+        assert_eq!(
+            q.marker_status("N0XYZ <K1ABC> -10", &payload),
+            (true, false)
+        );
+        assert_eq!(
+            q.marker_status("CQ K1ABC FN42", &format!("{}000", "0".repeat(74))),
+            (false, false)
+        );
+        q.enabled = true;
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        q.plan(14000.0, "W9XYZ", "EN37").unwrap();
+        assert_eq!(q.marker_status("CQ K1ABC FN42", &payload), (true, true));
+        q.remove("K1ABC");
+        assert_eq!(q.marker_status("CQ K1ABC FN42", &payload), (false, false));
+    }
+
+    #[test]
+    fn recurring_sort_combines_keys_expires_penalties_and_pins_active() {
+        let mut q = StationQueue::default();
+        for call in ["K1ABC", "N0XYZ", "W1AW"] {
+            q.add(call.into());
+        }
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        hear(&mut q, 500.0, "CQ N0XYZ EN37");
+        hear(&mut q, 500.0, "CQ W1AW EM00");
+        q.items[0].snr_db = 10.0;
+        q.items[1].snr_db = 0.0;
+        q.items[2].snr_db = 0.0;
+        q.items[0].sort_penalty_until_ms = 180000.0;
+        q.sort_preferences = [true, true, true];
+        q.sort_cycle(14000.0, "EN37");
+        assert_eq!(
+            q.items.iter().map(|s| s.call.as_str()).collect::<Vec<_>>(),
+            ["N0XYZ", "W1AW", "K1ABC"]
+        );
+        q.to_front("W1AW");
+        q.sort_cycle(14500.0, "EN37");
+        assert_eq!(
+            q.items[0].call, "W1AW",
+            "manual priority lasts until next cycle"
+        );
+        q.sort_cycle(15000.0, "EN37");
+        assert_eq!(q.items[0].call, "N0XYZ");
+        q.sort_cycle(180000.0, "EN37");
+        assert_eq!(
+            q.items[0].call, "K1ABC",
+            "strongest returns after penalty expires"
+        );
+        q.enabled = true;
+        hear(&mut q, 180500.0, "CQ N0XYZ EN37");
+        q.plan(194000.0, "W9XYZ", "EN37").unwrap();
+        q.sort_cycle(195000.0, "EN37");
+        assert_eq!(q.items[0].call, "N0XYZ", "active wins over all sort keys");
+    }
+
     #[test]
     fn cq_bulk_add_excludes_logged_own_busy_stale_and_duplicate_stations() {
         let mut tracker = Conversations::default();
@@ -981,6 +1172,7 @@ mod tests {
         assert!(q.active.is_none());
         assert!(q.pending.is_none());
         assert_eq!(q.items.last().unwrap().call, "K1ABC");
+        assert_eq!(q.items.last().unwrap().sort_penalty_until_ms, 314000.0);
         assert_eq!(
             q.log_pending.values().next().unwrap().outcome,
             "No response after 4 tries"

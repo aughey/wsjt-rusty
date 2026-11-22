@@ -47,6 +47,10 @@ extern "C" {
         attenuation_db: f32,
         auto_remove: bool,
         cq_timeout_seconds: u32,
+        sort_state: bool,
+        sort_signal: bool,
+        sort_distance: bool,
+        find_open_frequency: bool,
     ) -> String;
     #[wasm_bindgen(js_name = setTransmitAttenuation)]
     fn set_attenuation(tx: &JsValue, attenuation_db: f32);
@@ -77,6 +81,10 @@ struct Preferences {
     auto_remove: bool,
     #[serde(default = "default_cq_timeout")]
     cq_timeout_seconds: u32,
+    sort_state: bool,
+    sort_signal: bool,
+    sort_distance: bool,
+    find_open_frequency: bool,
 }
 fn default_auto_remove() -> bool {
     true
@@ -107,8 +115,13 @@ pub fn StationsToContact(
     grid: RwSignal<String>,
     radio: RadioControl,
     running: ReadSignal<bool>,
+    open_frequency: ReadSignal<Option<(f64, f32)>>,
 ) -> impl IntoView {
     let prefs = preferences();
+    let find_open_frequency = RwSignal::new(prefs.find_open_frequency);
+    let sort_state = RwSignal::new(prefs.sort_state);
+    let sort_signal = RwSignal::new(prefs.sort_signal);
+    let sort_distance = RwSignal::new(prefs.sort_distance);
     let auto_remove = RwSignal::new(prefs.auto_remove);
     let cq_timeout = RwSignal::new(if prefs.cq_timeout_seconds > 0 {
         prefs.cq_timeout_seconds
@@ -136,7 +149,21 @@ pub fn StationsToContact(
             attenuation.get(),
             auto_remove.get(),
             cq_timeout.get(),
+            sort_state.get(),
+            sort_signal.get(),
+            sort_distance.get(),
+            find_open_frequency.get(),
         ));
+    });
+    Effect::new(move |_| {
+        let find = find_open_frequency.get();
+        queue.update(|q| q.find_open_frequency = find);
+        let keys = [sort_state.get(), sort_signal.get(), sort_distance.get()];
+        let mine = grid.get();
+        queue.update(|q| {
+            q.sort_preferences = keys;
+            q.sort_selected(keys, &mine, js_sys::Date::now());
+        });
     });
     let refresh_outputs = move |permission| {
         let promise = list_outputs(permission);
@@ -273,6 +300,9 @@ pub fn StationsToContact(
         let now = js_sys::Date::now();
         if (now / 1000.0).floor() != (clock.get_untracked() / 1000.0).floor() {
             clock.set(now);
+            if running.get_untracked() {
+                queue.update(|q| q.sort_cycle(now, &grid.get_untracked()));
+            }
             if running.get_untracked() && auto_remove.get_untracked() {
                 queue.update(|q| q.expire_waiting(now, cq_timeout.get_untracked()));
             }
@@ -327,6 +357,10 @@ pub fn StationsToContact(
         }
         let mut plan = None;
         queue.update(|q| {
+            q.open_frequency_hz = open_frequency
+                .get_untracked()
+                .filter(|(ms, _)| (0.0..=2000.0).contains(&(js_sys::Date::now() - ms)))
+                .map(|(_, hz)| hz);
             plan = q.plan(
                 js_sys::Date::now(),
                 &mine.get_untracked(),
@@ -379,12 +413,15 @@ pub fn StationsToContact(
     view! {
         <section class="stations-panel results" aria-label="Stations to contact">
             <div class="toolbar"><h2>"Stations to contact"</h2><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+            <label><input type="checkbox" prop:checked=move || find_open_frequency.get() on:change=move |ev| find_open_frequency.set(event_target_checked(&ev)) />"find an open frequency"</label>
+            <p>"Uses up to 60 seconds of available waterfall history to choose a quiet 50 Hz transmit space. Each new contact gets a new choice, held through retries and replies. Changes apply to the next contact. This estimates occupancy; it cannot guarantee a clear channel."</p>
+            <p hidden=move || !find_open_frequency.get() || open_frequency.get().is_some_and(|(ms, _)| (0.0..=2000.0).contains(&(clock.get() - ms)))>"Waiting for waterfall data before choosing a transmit frequency."</p>
             <div class="card-sort" aria-label="Sort stations to contact">
-                <span>"Sort once:"</span>
-                <button class="secondary" on:click=move |_| queue.update(|q| q.sort(crate::geography::CardSort::Signal, &grid.get_untracked()))>"Signal ↓"</button>
-                <button class="secondary" on:click=move |_| queue.update(|q| q.sort(crate::geography::CardSort::State, &grid.get_untracked()))>"State · CQ first"</button>
-                <button class="secondary" disabled=move || crate::geography::Location::parse(&grid.get()).is_none() on:click=move |_| queue.update(|q| q.sort(crate::geography::CardSort::Distance, &grid.get_untracked()))>"Distance ↑"</button>
-                <span>"Active exchange stays first · strongest / CQ first / nearest"</span>
+                <span>"Sort each cycle:"</span>
+                <label><input type="checkbox" prop:checked=move || sort_state.get() on:change=move |ev| sort_state.set(event_target_checked(&ev)) />"State · CQ first"</label>
+                <label><input type="checkbox" prop:checked=move || sort_signal.get() on:change=move |ev| sort_signal.set(event_target_checked(&ev)) />"Signal ↓"</label>
+                <label><input type="checkbox" prop:checked=move || sort_distance.get() on:change=move |ev| sort_distance.set(event_target_checked(&ev)) />"Distance ↑"</label>
+                <span>"Active first · penalized last · checked keys: state, signal, distance (set My grid)"</span>
             </div>
             <p>"Click a conversation below to move that station here. Start contacting enables CQ-triggered calls and the ensuing exchange. Queued frequencies are searched first; full-band decoding continues. One station at a time; stations in other contacts wait for a fresh CQ."</p>
             <div class="transmit-settings">
@@ -473,7 +510,19 @@ pub fn StationsToContact(
                                 }
                                 _ => String::new(),
                             })}</p>
-                            <p class="station-match">{move || station.with(|s| format!("TX matches {:.1} Hz · report {:+03} dB from received SNR", s.frequency_hz, s.snr_db.round().clamp(-50.0,49.0) as i32))}</p>
+                            <p class="station-sort-penalty">{move || station.with(|s| {
+                                let seconds = ((s.sort_penalty_until_ms - clock.get()) / 1000.0).ceil();
+                                if seconds > 0.0 { format!("Sorting penalty: {seconds:.0} s remaining · four unanswered calls") } else { String::new() }
+                            })}</p>
+                            <p class="station-match">{move || station.with(|s| {
+                                let chosen = queue.with(|q| q.active.as_ref().filter(|a| a.contact.target == s.call).and_then(|a| a.transmit_frequency_hz));
+                                let placement = match chosen {
+                                    Some(hz) => format!("TX {hz:.1} Hz · held open-frequency choice"),
+                                    None if find_open_frequency.get() && contact.get().is_none() => "TX pending · open frequency chosen when contact starts".into(),
+                                    None => format!("TX {:.1} Hz · matches received audio", s.frequency_hz),
+                                };
+                                format!("{placement} · report {:+03} dB from received SNR", s.snr_db.round().clamp(-50.0,49.0) as i32)
+                            })}</p>
                             <p class="station-observation">{move || station.with(|s| if s.latest_text.is_empty() { "No current-session evidence yet".into() } else { format!("Last heard: {:+.1} dB · {:.0} audio Hz", s.snr_db, s.frequency_hz) })}</p>
                             <p class="station-location">{move || station.with(|s| crate::geography::description(s.location.as_ref().map(|(_, l)| l), &grid.get()))}</p>
                             <p class="message">{move || station.get().latest_text}</p>
@@ -503,7 +552,7 @@ pub fn StationsToContact(
                     }
                 } />
             </div>
-            <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. After four initial calls with no reply, the station moves to the back and waits for a fresh CQ. Later stages allow three transmissions; attempts stop after eight transmissions or three minutes. Removing or moving an active station to the back cancels its attempt. Move to front and sorting keep the current exchange active. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
+            <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. After four initial calls with no reply, the station moves to the back, sorts behind other stations for three minutes and waits for a fresh CQ. Later stages allow three transmissions; attempts stop after eight transmissions or three minutes. Removing or moving an active station to the back cancels its attempt. Move to front and sorting keep the current exchange active. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
         </section>
     }
 }

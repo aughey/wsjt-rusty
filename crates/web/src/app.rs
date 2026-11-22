@@ -89,6 +89,7 @@ struct DisplaySignals {
     automatic: ReadSignal<bool>,
     clock: WriteSignal<Option<(f64, f64)>>,
     actual_floor: WriteSignal<f32>,
+    open_frequency: WriteSignal<Option<(f64, f32)>>,
 }
 
 fn animate(
@@ -131,6 +132,9 @@ fn animate(
             {
                 display.clock.set(Some(frame.clock));
                 display.actual_floor.set(frame.floor_db);
+                display
+                    .open_frequency
+                    .set(frame.open_frequency.map(|hz| (frame.clock.1, hz)));
             }
         }
         animate(&monitor, canvas, ctx, display);
@@ -201,12 +205,14 @@ pub fn App() -> impl IntoView {
     let (automatic, set_automatic) = signal(true);
     let (actual_floor, set_actual_floor) = signal(-100.0_f32);
     let (waterfall_clock, set_waterfall_clock) = signal(None::<(f64, f64)>);
+    let (open_frequency, set_open_frequency) = signal(None::<(f64, f32)>);
     let (hovered, set_hovered) = signal(None::<Row>);
     let display = DisplaySignals {
         floor: floor_db,
         automatic,
         clock: set_waterfall_clock,
         actual_floor: set_actual_floor,
+        open_frequency: set_open_frequency,
     };
     let scale_floor = Signal::derive(move || {
         if automatic.get() {
@@ -457,6 +463,7 @@ pub fn App() -> impl IntoView {
         set_focused_contact.set(None);
         set_hovered.set(None);
         set_waterfall_clock.set(None);
+        set_open_frequency.set(None);
         set_capture_start.set("—".into());
         set_capture_end.set("—".into());
         set_progress.set("Waiting for the first audio chunk".into());
@@ -683,6 +690,12 @@ pub fn App() -> impl IntoView {
                             role="img" aria-label=format!("Live FFT waterfall across {low_hz:.0} to {high_hz:.0} audio hertz. Newest audio at top; 60 seconds of history. Brighter colors indicate stronger signals.")>
                             "Live frequency waterfall. Your browser must support canvas."
                         </canvas>
+                        {move || contact_queue.with(|q| q.active.as_ref().map(|a| (a.contact.target.clone(), a.transmit_frequency_hz.or_else(|| q.items.iter().find(|s| s.call == a.contact.target).map(|s| s.frequency_hz))))).and_then(|(call, hz)| hz.map(|hz| view! {
+                            <div class="tx-frequency-marker" class:label-right={hz > (low_hz + high_hz) / 2.0} role="img" aria-label=format!("Transmit to {call} at {hz:.1} audio Hz; 50 Hz bandwidth")
+                                style=format!("left:{}%;width:{}%", (hz-low_hz)/(high_hz-low_hz)*100.0, 50.0/(high_hz-low_hz)*100.0)>
+                                <span>{format!("TX {hz:.1} Hz")}</span>
+                            </div>
+                        }))}
                         <div class="decode-overlays" aria-label="Decoded FT8 signals">
                             <For each=move || rows.get()
                                 key=|row| (row.start_utc_ms.to_bits(), row.frequency_hz.to_bits(), row.payload.clone())
@@ -693,10 +706,14 @@ pub fn App() -> impl IntoView {
                                     let geometry = Signal::derive(move || crate::annotations::bounds(waterfall_clock.get(), low_hz, high_hz, start, end, frequency));
                                     let kind = message_kind::classify(&row.message, &row.payload);
                                     let description = format!("{} · {} · SNR {:+.1} dB · {:.1} Hz", kind.label(), row.message, row.snr_db, frequency);
+                                    let marker_row = row.clone();
+                                    let marker = Signal::derive(move || contact_queue.with(|q| q.marker_status(&marker_row.message, &marker_row.payload)));
                                     let pointer_row = row.clone();
                                     view! {
                                         <button class="decode-box" type="button"
-                                            aria-label=description.clone() title=description aria-describedby="decode-tooltip"
+                                            class:queued=move || marker.get().0
+                                            class:pursued=move || marker.get().1
+                                            aria-label=move || format!("{}{}", description, if marker.get().1 { " · Actively contacting" } else if marker.get().0 { " · Station queued" } else { "" }) aria-describedby="decode-tooltip"
                                             hidden=move || geometry.get().is_none()
                                             style=move || geometry.get().map(|b| format!("left:{}%;top:{}%;width:{}%;height:{}%;--decode-color:{}", b.left, b.top, b.width, b.height, kind.color())).unwrap_or_default()
                                             on:mouseenter=move |_| set_hovered.set(Some(pointer_row.clone()))
@@ -733,6 +750,7 @@ pub fn App() -> impl IntoView {
                         </span>
                     }).collect_view()}
                 </div>
+                <p class="spectrum-detail">"Thick outline: station queued · Filled, bright outline: actively contacting · Dashed cyan band: TX frequency"</p>
                 <div class="waterfall-settings">
                     <label class="auto-level"><input type="checkbox" prop:checked=move || automatic.get()
                         on:change=move |event| set_automatic.set(event_target_checked(&event)) />"Auto level"</label>
@@ -760,7 +778,7 @@ pub fn App() -> impl IntoView {
                     <div><dt>{move || if running.get() { "Audio through (UTC)" } else { "Capture end (UTC)" }}</dt><dd>{move || capture_end.get()}</dd></div>
                 </dl>
             </section>
-            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running />
+            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running open_frequency=open_frequency />
             <crate::contact_map::ContactMap conversations=conversations queue=contact_queue grid=my_grid mine=my_call />
             <section class="results conversation-board" aria-label="FT8 conversations">
                 <div class="toolbar"><h2>"Conversations"</h2><span class="rate">{move || format!("{} tracked", conversations.with(|t| t.items.len()))}</span></div>

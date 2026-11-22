@@ -3,8 +3,8 @@ const preferencesKey = 'wsjt-rusty.transmit.v1';
 export function loadTransmitPreferences() {
   try { return localStorage.getItem(preferencesKey) || '{}'; } catch (_) { return '{}'; }
 }
-export function saveTransmitPreferences(callsign, grid, output_id, output_label, attenuation_db = 0, auto_remove = true, cq_timeout_seconds = 180) {
-  try { localStorage.setItem(preferencesKey, JSON.stringify({ callsign, grid, output_id, output_label, attenuation_db, auto_remove, cq_timeout_seconds })); return ''; }
+export function saveTransmitPreferences(callsign, grid, output_id, output_label, attenuation_db = 0, auto_remove = true, cq_timeout_seconds = 180, sort_state = false, sort_signal = false, sort_distance = false, find_open_frequency = false) {
+  try { localStorage.setItem(preferencesKey, JSON.stringify({ callsign, grid, output_id, output_label, attenuation_db, auto_remove, cq_timeout_seconds, sort_state, sort_signal, sort_distance, find_open_frequency })); return ''; }
   catch (_) { return 'Browser storage is unavailable; these settings cannot be saved.'; }
 }
 export function outputSelectionSupported() { return typeof AudioContext.prototype.setSinkId === 'function'; }

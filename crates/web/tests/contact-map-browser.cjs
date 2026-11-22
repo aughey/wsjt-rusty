@@ -13,6 +13,10 @@ const path = require('node:path');
     const page = await browser.newPage({viewport: {width: 1200, height: 1000}});
     const errors = []; page.on('pageerror', e => errors.push(e.message));
     await page.addInitScript(() => {
+      const originalNow = Date.now.bind(Date);
+      window.utcOffset = 0;
+      Date.now = () => originalNow() + utcOffset;
+      window.setUtc = utc => { utcOffset = utc - originalNow(); };
       const OriginalWorker = Worker;
       window.Worker = class extends OriginalWorker {
         constructor(...args) { super(...args); window.testWorker = this; }
@@ -67,8 +71,15 @@ const path = require('node:path');
     await stations.filter({hasText: 'K1ABC'}).getByRole('button', {name: 'Move to front', exact: true}).click();
     assert.deepEqual(await stations.evaluateAll(es => es.map(e => e.dataset.station)), ['K1ABC', 'W6XYZ']);
     const queueSort = page.locator('[aria-label="Sort stations to contact"]');
-    await queueSort.getByRole('button', {name: 'Signal ↓'}).click();
+    await queueSort.getByRole('checkbox', {name: 'Signal ↓'}).check();
     assert.deepEqual(await stations.evaluateAll(es => es.map(e => e.dataset.station)), ['W6XYZ', 'K1ABC']);
+    assert.ok(await page.locator('.decode-box.queued').count() >= 2);
+    const border = await page.locator('.decode-box.queued').first().evaluate(e => getComputedStyle(e).borderTopWidth);
+    assert.equal(border, '3px');
+    await stations.filter({hasText: 'K1ABC'}).getByRole('button', {name: 'Move to front', exact: true}).click();
+    await page.evaluate(() => setUtc(Math.ceil(Date.now()/15000)*15000 + 1000));
+    await page.waitForFunction(() => document.querySelector('.station-queue > .queued-station')?.dataset.station === 'W6XYZ');
+    assert.equal(await queueSort.getByRole('checkbox', {name: 'Signal ↓'}).isChecked(), true);
     assert.match(await stations.filter({hasText: 'K1ABC'}).locator('.station-location').innerText(), /FN42.*42\.500.*-71\.000.*km/);
     await page.getByRole('button', {name: 'Open map', exact: true}).click();
     await page.locator('#contact-map .ol-viewport').waitFor();
@@ -95,7 +106,13 @@ const path = require('node:path');
     await page.getByRole('status').filter({hasText: 'Final FT8 decode complete'}).waitFor({timeout: 60000});
     await page.locator('section[aria-label="Stations to contact"]').getByRole('button',{name:'Remove all',exact:true}).click();
     assert.equal(await stations.count(),0);
+    await queueSort.getByRole('checkbox', {name: 'State · CQ first'}).check();
+    await page.reload();
+    await queueSort.getByRole('checkbox', {name: 'Signal ↓'}).waitFor();
+    assert.equal(await queueSort.getByRole('checkbox', {name: 'Signal ↓'}).isChecked(), true);
+    assert.equal(await queueSort.getByRole('checkbox', {name: 'State · CQ first'}).isChecked(), true);
+    assert.equal(await stations.count(), 0, 'restoring sort preferences does not restore or arm contacts');
     assert.deepEqual(errors, []);
-    console.log('PASS: live fixture, Stop/restart/release, one-shot sorts, front priority, grid distance, no movement animations, Remove all, CQ-first state, local OpenLayers/OSM map lifecycle, mobile layout');
+    console.log('PASS: live fixture, Stop/restart/release, saved cycle sorting, queued waterfall outlines, front priority, grid distance, no movement animations, Remove all, CQ-first state, local OpenLayers/OSM map lifecycle, mobile layout');
   } finally { await browser.close(); }
 })().catch(e => {console.error(e); process.exitCode = 1;});

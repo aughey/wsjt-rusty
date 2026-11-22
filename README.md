@@ -142,6 +142,10 @@ to see the message, SNR, audio frequency and UTC times. Boxes follow the audio
 clock and the FFT window center, not decode arrival time or subsequent changes
 to the computer clock. They clip to visible capture history/passband edges,
 age off after 60 seconds, and remain visible for final results after Stop.
+Stations in **Stations to contact** have thicker waterfall outlines. The station
+in the active exchange also has a translucent fill and brighter outline; these
+markers identify the decoded sender, preserving message category colors.
+
 Outline colors and small symbol badges distinguish CQ/calling (green ◉),
 reply/locator (cyan ◇), signal report (amber +), R-report (purple R), RRR
 (blue ✓), 73/RR73 (pink ✦), and other messages (gray ·). A legend appears below
@@ -212,7 +216,8 @@ receiving, waiting stations expire from the end of their last CQ; stations not
 yet heard get a full timeout. Active exchanges are retained. Each card records
 successful initial-call audio as **Contact tries**. After four initial calls with
 no response, the attempt ends after its final reply window and the station moves
-to the back, waiting for a fresh CQ. Failed/canceled audio does not count; these
+to the back, waiting for a fresh CQ and sorting behind unpenalized stations for
+three minutes. Failed/canceled audio does not count; these
 counts do not confirm RF delivery. Counts reset on capture restart or removal.
 
 Enter your callsign/grid and choose **Transmit audio output**, then connect and
@@ -509,9 +514,15 @@ Only ordinary CQ and locator exchanges supply locations. Locations survive
 message trimming while their card is retained; input restart clears observations.
 Four-character grids cover a large area, so these are approximate positions.
 
-Both lists have one-shot Signal, State and Distance sort buttons. Queue sorting
-changes waiting-station priority; an active exchange remains first. Selecting a
-conversation puts its caller at the front of the waiting queue. Card movement animations are disabled. State sorting puts CQ first.
+Queue sort checkboxes are saved in this browser and reapplied each 15-second
+cycle and before selecting a new caller. Checked criteria combine in order:
+CQ-first state, strongest signal, then nearest distance (requires My grid).
+The active exchange always stays first. Four unanswered initial calls move a
+station behind unpenalized stations for three minutes, even if it has a stronger
+signal or a new CQ. This is a sorting penalty, so it can still be contacted if
+no higher-priority station is eligible. Conversations retain one-shot sorting.
+Selecting a conversation puts its caller at the front of the waiting queue.
+Card movement animations are disabled.
 
 **Open map** displays a pan/zoom world map using bundled OpenLayers 10.10.0 and
 OpenStreetMap tiles. Great-circle lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or local attempts. Colors follow received stages; a white home marker uses
@@ -553,3 +564,16 @@ Conversations offers **Add all CQ stations** and **Automatically add new CQ stat
 Both exclude previously completed contacts, our own station, queued stations and
 stale or ongoing exchanges. Auto-add applies only to newly decoded CQs, starts
 off on every page load and is never saved. Adding stations does not arm transmit.
+
+The saved **find an open frequency** checkbox in Stations to contact selects a
+transmit audio frequency for each new attempt from up to 60 seconds of available
+waterfall spectra. It minimizes accumulated energy above each snapshot's median
+background across a 50 Hz footprint plus 10 Hz guards on each side. Missing
+snapshots do not count as quiet data; display floor/color settings have no effect.
+With no recent spectrum, new attempts wait for data. This is an occupancy estimate,
+not a guarantee that a channel is clear. The choice stays fixed through initial
+calls and the responding exchange, even if the partner changes frequency or the
+checkbox changes; each new attempt chooses again. With the option off, new attempts
+retain the existing received-frequency matching behavior. Cards show the chosen
+TX audio Hz, and a dashed cyan band marks its footprint on the waterfall. Receive
+SNR still sets outgoing reports; local playback remains separate from RX evidence.

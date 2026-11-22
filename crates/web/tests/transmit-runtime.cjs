@@ -33,11 +33,15 @@ test('saved station/output, selected sink, timed PTT, cancellation and device/er
   const code = fs.readFileSync(path.join(__dirname, '../src/transmit-runtime.js'), 'utf8');
   const api = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
   assert.equal(api.saveTransmitPreferences('W9XYZ', 'EN37', 'radio-card', 'USB Radio'), '');
-  assert.deepEqual(JSON.parse(api.loadTransmitPreferences()), { callsign: 'W9XYZ', grid: 'EN37', output_id: 'radio-card', output_label: 'USB Radio', attenuation_db: 0, auto_remove: true, cq_timeout_seconds: 180 });
+  assert.deepEqual(JSON.parse(api.loadTransmitPreferences()), { callsign: 'W9XYZ', grid: 'EN37', output_id: 'radio-card', output_label: 'USB Radio', attenuation_db: 0, auto_remove: true, cq_timeout_seconds: 180, sort_state: false, sort_signal: false, sort_distance: false, find_open_frequency: false });
   api.saveTransmitPreferences('W9XYZ', 'EN37', 'radio-card', 'USB Radio', 0, false, 60);
   assert.equal(JSON.parse(api.loadTransmitPreferences()).auto_remove, false);
   assert.equal(JSON.parse(api.loadTransmitPreferences()).cq_timeout_seconds, 60);
   assert.deepEqual(JSON.parse(await api.listAudioOutputs(true)), [{ id: 'radio-card', label: 'USB Radio' }]);
+  api.saveTransmitPreferences('W9XYZ', 'EN37', 'radio-card', 'USB Radio', 0, false, 60, true, false, true);
+  assert.deepEqual(['sort_state', 'sort_signal', 'sort_distance'].map(k => JSON.parse(api.loadTransmitPreferences())[k]), [true, false, true]);
+  api.saveTransmitPreferences('W9XYZ', 'EN37', 'radio-card', 'USB Radio', 0, false, 60, true, false, true, true);
+  assert.equal(JSON.parse(api.loadTransmitPreferences()).find_open_frequency, true);
   assert.equal(tracksStopped, 1);
   const events = [];
   let available = true, keyWait = null;

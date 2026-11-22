@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 (async () => {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${path.resolve(__dirname, '../../../tests/fixtures/ft8-210703-133430.wav')}`] });
+  const browser = await chromium.launch({ channel: process.env.WSJT_BROWSER_CHANNEL || 'chrome', headless: true, args: ['--no-sandbox', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${path.resolve(__dirname, '../../../tests/fixtures/ft8-210703-133430.wav')}`] });
   try {
     const page = await browser.newPage({ viewport: { width: 1200, height: 1000 } });
     const errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -130,6 +130,11 @@ const path = require('node:path');
     assert.equal(await page.evaluate(() => played[0].length), 151680);
     assert.ok(await page.evaluate(() => played[0].toneHz > 1200 && played[0].toneHz < 1250), 'audio tones match received 1200 Hz, not an old fixed 1500 Hz');
     assert.deepEqual(await page.evaluate(() => sinks), ['radio-card']);
+    const activeMarker = page.locator('.decode-box.pursued').first();
+    await activeMarker.waitFor({state: 'attached'});
+    assert.match(await activeMarker.getAttribute('aria-label'), /Actively contacting/);
+    assert.equal(await activeMarker.evaluate(e => getComputedStyle(e).borderTopWidth), '4px');
+    assert.notEqual(await activeMarker.evaluate(e => getComputedStyle(e).backgroundColor), 'rgba(0, 0, 0, 0)');
     const card = panel.locator('[data-station="N0XYZ"]');
     assert.equal(await card.locator('.exchange-slot').count(), 6);
     assert.match(await card.locator('.exchange-slot.received').first().innerText(), /CQ N0XYZ EM00/);

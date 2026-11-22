@@ -6,6 +6,7 @@ pub mod contact_queue;
 pub mod conversations;
 pub mod geography;
 pub mod message_kind;
+pub mod open_frequency;
 pub mod receiver;
 pub mod spectrum;
 pub mod transmit;
