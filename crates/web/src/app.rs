@@ -90,6 +90,8 @@ struct DisplaySignals {
     clock: WriteSignal<Option<(f64, f64)>>,
     actual_floor: WriteSignal<f32>,
     open_frequency: WriteSignal<Option<(f64, f32)>>,
+    playing: RwSignal<bool>,
+    queue: RwSignal<crate::contact_queue::StationQueue>,
 }
 
 fn animate(
@@ -128,13 +130,18 @@ fn animate(
                     samples,
                     display.floor.get_untracked(),
                     display.automatic.get_untracked(),
+                    display.playing.get_untracked()
+                        || display.queue.with_untracked(|q| {
+                            q.pending.as_ref().is_some_and(|p| {
+                                capture.time_ms() >= p.start_ms
+                                    && capture.time_ms() < p.start_ms + 12_640.0
+                            })
+                        }),
                 )
             {
                 display.clock.set(Some(frame.clock));
                 display.actual_floor.set(frame.floor_db);
-                display
-                    .open_frequency
-                    .set(frame.open_frequency.map(|hz| (frame.clock.1, hz)));
+                display.open_frequency.set(frame.open_frequency);
             }
         }
         animate(&monitor, canvas, ctx, display);
@@ -207,13 +214,6 @@ pub fn App() -> impl IntoView {
     let (waterfall_clock, set_waterfall_clock) = signal(None::<(f64, f64)>);
     let (open_frequency, set_open_frequency) = signal(None::<(f64, f32)>);
     let (hovered, set_hovered) = signal(None::<Row>);
-    let display = DisplaySignals {
-        floor: floor_db,
-        automatic,
-        clock: set_waterfall_clock,
-        actual_floor: set_actual_floor,
-        open_frequency: set_open_frequency,
-    };
     let scale_floor = Signal::derive(move || {
         if automatic.get() {
             actual_floor.get()
@@ -246,6 +246,17 @@ pub fn App() -> impl IntoView {
     let mut queue_state = crate::contact_queue::StationQueue::default();
     queue_state.log_session = format!("{:.0}-{}", js_sys::Date::now(), js_sys::Math::random());
     let contact_queue = RwSignal::new(queue_state);
+    let playing = RwSignal::new(false);
+    let display = DisplaySignals {
+        floor: floor_db,
+        playing,
+        queue: contact_queue,
+        automatic,
+        clock: set_waterfall_clock,
+        actual_floor: set_actual_floor,
+        open_frequency: set_open_frequency,
+    };
+
     let contacted = RwSignal::new(Vec::<String>::new());
     let contact_history_ready = RwSignal::new(false);
     // Deliberately session-only: never restore or save this opt-in.
@@ -778,7 +789,7 @@ pub fn App() -> impl IntoView {
                     <div><dt>{move || if running.get() { "Audio through (UTC)" } else { "Capture end (UTC)" }}</dt><dd>{move || capture_end.get()}</dd></div>
                 </dl>
             </section>
-            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running open_frequency=open_frequency />
+            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running open_frequency=open_frequency playing=playing />
             <crate::contact_map::ContactMap conversations=conversations queue=contact_queue grid=my_grid mine=my_call />
             <section class="results conversation-board" aria-label="FT8 conversations">
                 <div class="toolbar"><h2>"Conversations"</h2><span class="rate">{move || format!("{} tracked", conversations.with(|t| t.items.len()))}</span></div>

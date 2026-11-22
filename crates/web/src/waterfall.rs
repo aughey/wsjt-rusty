@@ -18,12 +18,14 @@ pub struct Waterfall {
     rate: f64,
     scale: LevelScale,
     occupancy: crate::open_frequency::Occupancy,
+    receive_gate: crate::spectrum::ReceiveSnapshotGate,
+    last_floor: f32,
 }
 
 pub struct FrameInfo {
     pub clock: (f64, f64),
     pub floor_db: f32,
-    pub open_frequency: Option<f32>,
+    pub open_frequency: Option<(f64, f32)>,
 }
 
 pub fn clear(canvas: &HtmlCanvasElement, context: &CanvasRenderingContext2d) {
@@ -51,6 +53,8 @@ impl Waterfall {
             rate: rate.into(),
             scale: LevelScale::default(),
             occupancy: crate::open_frequency::Occupancy::new(low, high, WIDTH as usize),
+            receive_gate: crate::spectrum::ReceiveSnapshotGate::default(),
+            last_floor: -100.0,
         })
     }
 
@@ -61,6 +65,7 @@ impl Waterfall {
         samples: &[f32],
         manual_floor: f32,
         automatic: bool,
+        transmitting: bool,
     ) -> Result<Option<FrameInfo>, JsValue> {
         let rows = match self.last_row {
             Some(last) => ((now_ms - last) / ROW_MS).floor() as u32,
@@ -91,10 +96,26 @@ impl Waterfall {
         self.context.set_fill_style_str("#0b1325");
         // Blank skipped animation rows, so a throttled tab never invents spectra.
         self.context.fill_rect(0.0, 0.0, WIDTH.into(), shift.into());
+        let window_ms = FFT_SIZE as f64 / self.rate * 1000.0;
+        let latest = audio_ms - window_ms / 2.0;
+        let first = *self.first_ms.get_or_insert(latest);
+        self.occupancy.expire(latest);
+        if !self.receive_gate.allow(audio_ms, window_ms, transmitting) {
+            return Ok(Some(FrameInfo {
+                clock: (first, latest),
+                floor_db: if automatic {
+                    self.last_floor
+                } else {
+                    manual_floor
+                },
+                open_frequency: self.occupancy.choice(),
+            }));
+        }
         self.spectrum
             .levels(samples, &mut self.levels)
             .map_err(JsValue::from_str)?;
         let floor_db = self.scale.floor(&self.levels, manual_floor, automatic);
+        self.last_floor = floor_db;
         for (pixel, &db) in self
             .rgba
             .as_chunks_mut::<4>()
@@ -107,13 +128,11 @@ impl Waterfall {
         let image = ImageData::new_with_u8_clamped_array_and_sh(Clamped(&self.rgba), WIDTH, 1)?;
         self.context.put_image_data(&image, 0.0, 0.0)?;
         // FFT pixels describe the center of the Hann snapshot, not its arrival.
-        let latest = audio_ms - FFT_SIZE as f64 / self.rate * 500.0;
-        let first = *self.first_ms.get_or_insert(latest);
         self.occupancy.push(latest, &self.levels);
         Ok(Some(FrameInfo {
             clock: (first, latest),
             floor_db,
-            open_frequency: self.occupancy.best(),
+            open_frequency: self.occupancy.choice(),
         }))
     }
 }

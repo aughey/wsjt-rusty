@@ -192,3 +192,33 @@ mod tests {
         assert!(Spectrum::new(8000.0, 100.0, 4100.0, 1200).is_err());
     }
 }
+
+/// Keep FFT snapshots containing our own transmit audio out of display/history.
+#[derive(Default)]
+pub struct ReceiveSnapshotGate {
+    receive_after_ms: f64,
+}
+impl ReceiveSnapshotGate {
+    pub fn allow(&mut self, audio_ms: f64, window_ms: f64, transmitting: bool) -> bool {
+        if transmitting {
+            self.receive_after_ms = audio_ms + window_ms;
+            false
+        } else {
+            audio_ms >= self.receive_after_ms
+        }
+    }
+}
+
+#[cfg(test)]
+mod transmit_gate_tests {
+    use super::*;
+    #[test]
+    fn transmit_rows_and_fft_tails_are_blank_until_receive_only_snapshot() {
+        let mut gate = ReceiveSnapshotGate::default();
+        assert!(gate.allow(1000.0, 350.0, false));
+        assert!(!gate.allow(1100.0, 350.0, true));
+        assert!(!gate.allow(2000.0, 350.0, true));
+        assert!(!gate.allow(2200.0, 350.0, false));
+        assert!(gate.allow(2350.0, 350.0, false));
+    }
+}

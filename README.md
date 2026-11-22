@@ -566,7 +566,7 @@ stale or ongoing exchanges. Auto-add applies only to newly decoded CQs, starts
 off on every page load and is never saved. Adding stations does not arm transmit.
 
 The saved **find an open frequency** checkbox in Stations to contact selects a
-transmit audio frequency for each new attempt from up to 60 seconds of available
+transmit audio frequency within 100–3000 Hz for each new attempt from up to 60 seconds of available
 waterfall spectra. It minimizes accumulated energy above each snapshot's median
 background across a 50 Hz footprint plus 10 Hz guards on each side. Missing
 snapshots do not count as quiet data; display floor/color settings have no effect.
@@ -577,3 +577,7 @@ checkbox changes; each new attempt chooses again. With the option off, new attem
 retain the existing received-frequency matching behavior. Cards show the chosen
 TX audio Hz, and a dashed cyan band marks its footprint on the waterfall. Receive
 SNR still sets outgoing reports; local playback remains separate from RX evidence.
+
+Waterfall transmit intervals scroll as blank rows. Local TX audio and FFT snapshots
+that still overlap its tail do not paint spectra or contribute to open-frequency
+occupancy; received history remains visible and continues aging against audio time.

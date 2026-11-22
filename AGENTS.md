@@ -470,3 +470,10 @@ including retries and partner replies; new attempts choose again. No recent
 spectrum means no new open-frequency attempt. Preserve received frequency/SNR,
 report generation and decode priorities separately. Cards and the dashed cyan
 waterfall band display the actual selected TX footprint.
+
+Blank waterfall rows during local TX and until a full receive-only FFT snapshot is
+available afterward. Keep the waterfall clock/history scrolling; never feed TX
+spectra into occupancy or refresh the last receive-spectrum timestamp while blank.
+
+Automatic open-frequency TX selection is bounded to 100–3000 audio Hz, with
+the full footprint and guards inside that range; RX keeps its existing passband.

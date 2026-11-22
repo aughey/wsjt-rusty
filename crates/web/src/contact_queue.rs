@@ -646,10 +646,10 @@ impl StationQueue {
                     && now_ms <= due - 200.0
             })?;
             let transmit_frequency_hz = if self.find_open_frequency {
-                Some(
-                    self.open_frequency_hz
-                        .filter(|hz| hz.is_finite() && (100.0..=3950.0).contains(hz))?,
-                )
+                Some(self.open_frequency_hz.filter(|hz| {
+                    hz.is_finite()
+                        && (100.0..=crate::open_frequency::SEARCH_HIGH_HZ - 50.0).contains(hz)
+                })?)
             } else {
                 None
             };

@@ -26,6 +26,9 @@ const path = require('node:path');
       const setSink = AudioContext.prototype.setSinkId;
       AudioContext.prototype.setSinkId = function() { return setSink.call(this, ''); };
       window.played = [];
+      window.spectrumRows = 0;
+      const put = CanvasRenderingContext2D.prototype.putImageData;
+      CanvasRenderingContext2D.prototype.putImageData = function(...args) { spectrumRows++; return put.apply(this, args); };
       const createSource = AudioContext.prototype.createBufferSource;
       AudioContext.prototype.createBufferSource = function() {
         const source = createSource.call(this), start = source.start.bind(source);
@@ -49,6 +52,13 @@ const path = require('node:path');
     assert.equal(await page.locator('.tx-frequency-marker').count(), 0, 'restoration does not schedule TX');
     await page.getByRole('button', { name: 'Start listening', exact: true }).click();
     await page.locator('.conversation').first().waitFor({ timeout: 60000 });
+    await page.evaluate(() => {
+      window.waitingFlashes = 0;
+      window.waitingWatch = setInterval(() => {
+        const message = [...document.querySelectorAll('.stations-panel p')].find(p => p.textContent.includes('Waiting for waterfall data'));
+        if (message && !message.hidden) waitingFlashes++;
+      }, 20);
+    });
     await panel.getByLabel('My callsign', { exact: true }).fill('W9XYZ');
     await panel.getByLabel('My grid', { exact: true }).fill('EN37');
     await panel.getByLabel('Transmit audio output', { exact: true }).selectOption('default');
@@ -84,6 +94,20 @@ const path = require('node:path');
     await page.waitForFunction(() => played.length > 0, { timeout: 5000 });
     const measured = await page.evaluate(() => played[0]);
     assert.ok(measured >= hz - 3 && measured <= hz + 47, `PCM ${measured} Hz matches selected FT8 footprint ${hz}`);
+    await page.waitForFunction(() => document.querySelector('[data-station="K1ABC"]').classList.contains('transmitting'), null, { timeout: 6000 });
+    await page.waitForTimeout(600);
+    const before = await page.evaluate(() => spectrumRows);
+    await page.waitForTimeout(2200);
+    assert.equal(await page.evaluate(() => spectrumRows), before, 'no receive spectra are painted while transmitting');
+    assert.equal(await page.locator('#waterfall').evaluate(canvas => {
+      const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, 1).data;
+      for (let i = 0; i < pixels.length; i += 4) if (pixels[i] !== 11 || pixels[i+1] !== 19 || pixels[i+2] !== 37) return false;
+      return true;
+    }), true, 'TX rows are blank while history keeps scrolling');
+    await page.waitForFunction(() => !document.querySelector('[data-station="K1ABC"]').classList.contains('transmitting'), null, { timeout: 16000 });
+    await page.waitForFunction(n => spectrumRows > n, before, { timeout: 3000 });
+    await page.evaluate(() => clearInterval(waitingWatch));
+    assert.equal(await page.evaluate(() => waitingFlashes), 0, 'waiting message never flashes with available RX data or during TX');
     await checkbox.uncheck();
     assert.match(await card.locator('.station-match').innerText(), new RegExp(`TX ${hz.toFixed(1)} Hz.*held`));
     await page.screenshot({ path: path.resolve('target/open-frequency-desktop.png'), fullPage: true });

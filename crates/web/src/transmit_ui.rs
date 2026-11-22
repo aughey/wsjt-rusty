@@ -116,6 +116,7 @@ pub fn StationsToContact(
     radio: RadioControl,
     running: ReadSignal<bool>,
     open_frequency: ReadSignal<Option<(f64, f32)>>,
+    playing: RwSignal<bool>,
 ) -> impl IntoView {
     let prefs = preferences();
     let find_open_frequency = RwSignal::new(prefs.find_open_frequency);
@@ -185,7 +186,6 @@ pub fn StationsToContact(
     let preparing = RwSignal::new(false);
     let current_plan = StoredValue::new_local(None::<u64>);
     let busy = RwSignal::new(false);
-    let playing = RwSignal::new(false);
     let phase = RwSignal::new(String::new());
     let clock = RwSignal::new(js_sys::Date::now());
     let status =
@@ -357,10 +357,10 @@ pub fn StationsToContact(
         }
         let mut plan = None;
         queue.update(|q| {
-            q.open_frequency_hz = open_frequency
-                .get_untracked()
-                .filter(|(ms, _)| (0.0..=2000.0).contains(&(js_sys::Date::now() - ms)))
-                .map(|(_, hz)| hz);
+            q.open_frequency_hz = crate::open_frequency::recent_choice(
+                open_frequency.get_untracked(),
+                js_sys::Date::now(),
+            );
             plan = q.plan(
                 js_sys::Date::now(),
                 &mine.get_untracked(),
@@ -414,8 +414,8 @@ pub fn StationsToContact(
         <section class="stations-panel results" aria-label="Stations to contact">
             <div class="toolbar"><h2>"Stations to contact"</h2><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
             <label><input type="checkbox" prop:checked=move || find_open_frequency.get() on:change=move |ev| find_open_frequency.set(event_target_checked(&ev)) />"find an open frequency"</label>
-            <p>"Uses up to 60 seconds of available waterfall history to choose a quiet 50 Hz transmit space. Each new contact gets a new choice, held through retries and replies. Changes apply to the next contact. This estimates occupancy; it cannot guarantee a clear channel."</p>
-            <p hidden=move || !find_open_frequency.get() || open_frequency.get().is_some_and(|(ms, _)| (0.0..=2000.0).contains(&(clock.get() - ms)))>"Waiting for waterfall data before choosing a transmit frequency."</p>
+            <p>"Uses up to 60 seconds of available waterfall history to choose a quiet 50 Hz transmit space within 100–3000 audio Hz. Each new contact gets a new choice, held through retries and replies. Changes apply to the next contact. This estimates occupancy; it cannot guarantee a clear channel."</p>
+            <p hidden=move || { let _ = clock.get(); !find_open_frequency.get() || playing.get() || queue.with(|q| q.active.is_some()) || crate::open_frequency::recent_choice(open_frequency.get(), js_sys::Date::now()).is_some() }>"Waiting for waterfall data before choosing a transmit frequency."</p>
             <div class="card-sort" aria-label="Sort stations to contact">
                 <span>"Sort each cycle:"</span>
                 <label><input type="checkbox" prop:checked=move || sort_state.get() on:change=move |ev| sort_state.set(event_target_checked(&ev)) />"State · CQ first"</label>
