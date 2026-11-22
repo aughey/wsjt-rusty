@@ -209,3 +209,21 @@ attenuation and smooth live changes (15 ms time constant). It does not change
 the generated FT8 PCM. Queued station cards reuse the conversation stage renderer
 and bounded receive tracker, retaining both directions and late stage evidence
 while queued. Local transmissions remain separate from received stage evidence.
+
+## Browser grid locations
+
+`crates/web/src/geography.rs` adapts Maidenhead arithmetic from WSJT-X
+`lib/grid2deg.f90` (WSJT development team, GPL-3.0-or-later), whose hash is
+recorded in `UPSTREAM-SHA256.txt`. Display longitude is east-positive (upstream
+returns west-positive). Four/six-character locations use actual cell centers;
+upstream's missing-subsquare `mm` default is slightly off the four-character
+center. Approximate distance uses spherical haversine with a 6371 km Earth
+radius, not upstream ellipsoidal `geodist`, azimuth or propagation predictions.
+No receive algorithm changes.
+
+Only ordinary CQ/locator payloads supply a sender location. Bounded conversation
+and queue models retain the latest grid by signal timestamp independently of
+trimmed evidence; delayed earlier messages cannot replace newer grids.
+OpenLayers 10.10.0 (BSD-2-Clause, license in `crates/web/vendor`) is vendored for
+browser-only display. Visible OSM tiles use HTTPS, attribution and browser cache.
+Map opening is explicit; unknown locations are omitted. No spot service is used.

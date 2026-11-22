@@ -296,9 +296,16 @@ bounded state machine: 100 unique stations, 12 evidence messages each, FIFO amon
 eligible fresh CQs, one active exchange. A station in another contact must wait
 for a fresh CQ. Never roll a stale CQ forward to a later slot. Initial calls use
 the immediately following UTC slot, replies advance only on ordinary payloads
-addressed from the partner to our station. Retry each stage at most three times;
-cap exchanges at eight transmissions/180 seconds, then move back and await CQ.
-Move to back/remove cancels an active attempt. Completed cards require Queue again.
+addressed from the partner to our station. Allow four initial-call transmissions
+without a response, then end the active attempt and move the station to the back
+after the final reply window. Later stages allow three transmissions. Track and
+display successful initial-call audio counts per queued station, resetting on
+capture restart; failed/canceled audio does not count. Waiting stations expire
+from the last CQ frame end with a saved enabled-by-default 180-second timeout;
+unheard stations get a full timeout and active exchanges are exempt. Expiry runs
+while receiving even when contacting is paused. Keep contact logs on expiry.
+Cap exchanges at eight transmissions/180 seconds, then move back and await CQ.
+Move to back/remove cancels an active attempt. Completed exchanges automatically leave the queue and retain their persistent contact record. Remove all cancels, disarms and clears the queue without deleting log records.
 Keep local sent status separate from received evidence and RF/QSO confirmation.
 Show last-CQ time ago (from frame end, updated each second) and first
 decode-arrival delay/deadline in each queued card; retain UTC internally.
@@ -421,3 +428,33 @@ by the AudioContext playback clock. Successful completed audio retains a cyan
 glow and exact message per outgoing step until capture restart; canceled/failed
 attempts must not create sent history. Keep received evidence separate and honor
 reduced-motion preferences with a steady active glow.
+
+### Card priority, sorting and geography
+
+Active contact attempts move to the queue front and remain first during explicit
+sorts or Move to front actions on waiting stations; those actions do not cancel
+an exchange. Move to back/remove retain their cancellation behavior. Selecting
+a conversation adds it at the front of the waiting queue. Both lists provide
+one-shot strongest-SNR, CQ-first-state and nearest-distance sorts;
+subsequent activity keeps conversation display cells stable until another sort.
+`geography.rs` owns validated Maidenhead cell centers and approximate spherical
+kilometer distances, using only decoded ordinary CQ/locator sender evidence.
+Retain latest locations separately from trimmed message history, bounded by
+retained participants/cards, and clear observations on capture restart. Missing
+grids stay unknown. `contact_map.rs`/`map-runtime.js` bind locally vendored
+OpenLayers to an explicit optional OSM map, preserving attribution, tile caching,
+cleanup and keyboard-readable location text. Card movement animations are disabled. Map great-circle paths connect known endpoints; inferred context and local attempts use dashed lines.
+
+The browser contact log uses contact_log.rs and contact_log_ui.rs. Journal versioned
+attempt/evidence records before removing completed cards; RX and successful TX
+audio have separate timestamps/directions. A dedicated contact-log-worker.js uses
+vendored sql.js SQLite and commits the database image in IndexedDB transactions
+that serialize tabs. Acknowledge only committed revisions; retain failures for
+retry. Block new attempts at 200 pending writes, and retain up to 200 recent
+archived attempts for late recovery updates in a capture, with 256 events each.
+Contacts/Evidence tabs page 25 records; completed logged stations are hatched and
+labeled Contacted. ADIF retains dates/times, known grids/reports and timestamped
+evidence, without inventing QSL or mutual QSO confirmation. Capture fresh CI-V
+ReadFrequency results (at most five seconds old) from serialized radio polls for
+contact RF dial MHz / ADIF FREQ, preserving the query timestamp. Never use the
+editable frequency form or audio Hz; stale/disconnected readbacks remain unknown.

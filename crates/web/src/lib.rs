@@ -1,8 +1,10 @@
 //! Browser-only Leptos shell. Capture and presentation belong here, outside DSP crates.
 
 pub mod annotations;
+pub mod contact_log;
 pub mod contact_queue;
 pub mod conversations;
+pub mod geography;
 pub mod message_kind;
 pub mod receiver;
 pub mod spectrum;
@@ -34,3 +36,9 @@ pub fn start() {
         leptos::mount::mount_to_body(app::App);
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+mod contact_map;
+
+#[cfg(target_arch = "wasm32")]
+mod contact_log_ui;

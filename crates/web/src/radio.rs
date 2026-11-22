@@ -123,6 +123,7 @@ struct Ui {
     polling: RwSignal<bool>,
     status: RwSignal<String>,
     dial: RwSignal<String>,
+    frequency: RwSignal<Option<(u64, f64)>>,
     actual_mode: RwSignal<String>,
     actual_power: RwSignal<String>,
     tx: RwSignal<bool>,
@@ -130,10 +131,12 @@ struct Ui {
 
 async fn refresh(port: &Port, ui: Ui, alive: &Cell<bool>) -> Result<(), String> {
     let frequency = port.execute(Command::ReadFrequency).await?;
+    let frequency_read_ms = js_sys::Date::now();
     let mode = port.execute(Command::ReadMode).await?;
     if alive.get() {
         if let Reply::Frequency(hz) = frequency {
             ui.dial.set(format!("{:.6} MHz", hz as f64 / 1_000_000.0));
+            ui.frequency.set(Some((hz, frequency_read_ms)));
         }
         if let Reply::Mode(mode) = mode {
             ui.actual_mode.set(mode.to_string());
@@ -193,6 +196,7 @@ fn run(ports: Rc<RefCell<Ports>>, alive: Rc<Cell<bool>>, ui: Ui, commands: Vec<C
                 ui.active.set(false);
                 ui.tx.set(false);
                 ui.dial.set("Unknown".into());
+                ui.frequency.set(None);
                 ui.actual_mode.set("Unknown".into());
                 ui.status.set(format!(
                     "{error}. Disconnected; TX release attempted. Check the radio."
@@ -226,6 +230,28 @@ struct PttLease {
     keyed: Cell<bool>,
 }
 impl RadioControl {
+    /// Fresh CI-V ReadFrequency result, never the editable frequency form.
+    /// Reuse serialized background queries so logging cannot delay timed PTT.
+    pub fn frequency(self) -> Option<(u64, f64)> {
+        self.access.with_value(|access| {
+            let access = access.as_ref()?;
+            if !access.alive.get()
+                || !access.ui.active.get_untracked()
+                || !access
+                    .ports
+                    .borrow()
+                    .cat
+                    .as_ref()
+                    .is_some_and(|p| is_open(&p.handle))
+            {
+                return None;
+            }
+            access.ui.frequency.get_untracked().filter(|(_, ms)| {
+                let age = js_sys::Date::now() - ms;
+                (0.0..=5_000.0).contains(&age)
+            })
+        })
+    }
     pub fn new() -> Self {
         Self {
             access: StoredValue::new_local(None),
@@ -470,6 +496,7 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
             "Web Serial unavailable. Use a supported browser on localhost or HTTPS, or the native Rust adapter.".into()
         }),
         dial: RwSignal::new("Unknown".into()),
+        frequency: RwSignal::new(None),
         actual_mode: RwSignal::new("Unknown".into()),
         actual_power: RwSignal::new("Not read".into()),
         tx: RwSignal::new(false),
@@ -536,6 +563,7 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
             ptt_busy.set(false);
             ptt_status.set("PTT release attempted; verify RX on the radio.".into());
             ui.dial.set("Unknown".into());
+            ui.frequency.set(None);
             ui.actual_mode.set("Unknown".into());
             ui.status
                 .set("Radio port closed; release attempted. Check radio and reconnect.".into());
@@ -631,6 +659,7 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
         ptt_active.set(false);
         ptt_busy.set(false);
         ui.dial.set("Unknown".into());
+        ui.frequency.set(None);
         ui.actual_mode.set("Unknown".into());
         ui.actual_power.set("Not read".into());
         ui.status
@@ -814,6 +843,7 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
         if rx_alive.get() {
             ui.status.set("Radio disconnected after RX request".into());
             ui.dial.set("Unknown".into());
+            ui.frequency.set(None);
             ui.actual_mode.set("Unknown".into());
             ptt_status.set(
                 "RX requested; ports closed. Verify receive on the radio, then reconnect.".into(),

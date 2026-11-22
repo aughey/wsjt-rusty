@@ -213,3 +213,23 @@ button.transmit { background: #ffc2d8; border-color: #ffc2d8; color: #42172b; }
 @media (prefers-reduced-motion: reduce) {
   .queued-station.transmitting, .transmit-steps li.transmitting { animation: none; box-shadow: 0 0 14px rgb(255 190 75 / 55%); }
 }
+
+.card-sort { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin: .75rem 0; font-size: .8rem; color: #aabccc; }
+.card-sort button { padding: .35rem .7rem; }
+.conversation-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.station-location { font-size: .8rem; color: #b8cbdc; }
+#contact-map { height: clamp(20rem, 50vh, 38rem); width: 100%; background: #172c3e; border: 1px solid #52667a; border-radius: .5rem; }
+#contact-map canvas { border-radius: 0; }
+#contact-map .ol-attribution { color: #102030; }
+#contact-map .ol-control button { padding: 0; }
+#contact-map-detail, #contact-map-status, .contact-map-panel > p { color: #aabccc; font-size: .85rem; }
+
+.conversation.contacted { filter: grayscale(1); opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgb(172 193 211 / 20%) 6px 8px, transparent 8px 14px); border-style: dashed; }
+.conversation.contacted .conversation-state { font-weight: 700; }
+.log-tabs { display: flex; gap: .5rem; margin: 1rem 0; border-bottom: 1px solid #52667a; padding-bottom: .5rem; }
+.log-tabs [aria-selected="false"] { background: transparent; color: #b8cbdc; border-color: #52667a; }
+.contact-log .error { color: #ffce72; }
+.contact-log td button { padding: .35rem .6rem; }
+.log-payload { max-width: 16rem; white-space: normal; overflow-wrap: anywhere; font-size: .7rem; }
+
+.conversation.contacted:hover, .conversation.contacted:focus-visible { opacity: .75; }

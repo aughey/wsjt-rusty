@@ -1,4 +1,5 @@
 //! Receive-only FT8 conversation estimates. Never synthesizes decoded messages.
+use crate::geography::{CardSort, Location, decoded_location, distance_key};
 use crate::message_kind::{MessageKind, classify};
 
 pub const SLOT_MS: f64 = 15_000.0;
@@ -151,6 +152,7 @@ pub struct Conversation {
     /// Stable grid-cell index, reused only after its conversation leaves the tracker.
     pub display_slot: usize,
     pub caller: String,
+    pub locations: std::collections::BTreeMap<String, (f64, Location)>,
     pub partner: Option<String>,
     pub stage: Stage,
     pub messages: Vec<Heard>,
@@ -164,6 +166,10 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    pub fn location(&self) -> Option<&Location> {
+        self.locations.get(&self.caller).map(|(_, l)| l)
+    }
+
     pub fn label(&self) -> String {
         format!(
             "{} ↔ {}",
@@ -313,6 +319,31 @@ pub struct Conversations {
 }
 
 impl Conversations {
+    /// Explicit one-shot ordering; subsequent updates retain these cells.
+    pub fn sort(&mut self, by: CardSort, mine: &str) {
+        self.items.sort_by(|a, b| match by {
+            CardSort::Signal => b
+                .messages
+                .last()
+                .map(|h| h.snr_db)
+                .unwrap_or(f32::NEG_INFINITY)
+                .total_cmp(
+                    &a.messages
+                        .last()
+                        .map(|h| h.snr_db)
+                        .unwrap_or(f32::NEG_INFINITY),
+                ),
+            CardSort::State => (a.status(self.now_ms) == "Stale", a.stage)
+                .cmp(&(b.status(self.now_ms) == "Stale", b.stage)),
+            CardSort::Distance => {
+                distance_key(a.location(), mine).total_cmp(&distance_key(b.location(), mine))
+            }
+        });
+        for (slot, c) in self.items.iter_mut().enumerate() {
+            c.display_slot = slot;
+        }
+    }
+
     /// Ingest the entire batch before advancing time: recovery decodes can arrive late.
     pub fn update<'a>(
         &mut self,
@@ -415,6 +446,7 @@ impl Conversations {
                 id: self.next_id,
                 display_slot,
                 caller: sender.clone(),
+                locations: Default::default(),
                 partner: recipient.clone(),
                 stage,
                 messages: Vec::new(),
@@ -438,6 +470,11 @@ impl Conversations {
             _ => None,
         };
         let c = &mut self.items[index];
+        if let Some(location) = decoded_location(text, kind)
+            && c.locations.get(&sender).is_none_or(|(ms, _)| start >= *ms)
+        {
+            c.locations.insert(sender.clone(), (start, location));
+        }
         if c.partner.is_none()
             && let Some(to) = recipient
         {
@@ -537,6 +574,27 @@ mod tests {
                 -12.0,
             )],
         );
+    }
+    #[test]
+    fn explicit_sorts_keep_cells_until_requested_and_retain_sender_locations() {
+        let mut t = Conversations::default();
+        feed(&mut t, 0, "CQ K1ABC FN42");
+        feed(&mut t, 0, "CQ N0XYZ EN37");
+        t.sort(CardSort::Distance, "EN37");
+        assert_eq!(t.items[0].caller, "N0XYZ");
+        feed(&mut t, 1, "N0XYZ W9XYZ EN50");
+        assert_eq!(t.items[0].caller, "N0XYZ");
+        assert_eq!(t.items[0].display_slot, 0);
+        assert_eq!(t.items[0].location().unwrap().grid, "EN37");
+        assert_eq!(t.items[0].locations.get("W9XYZ").unwrap().1.grid, "EN50");
+        t.sort(CardSort::State, "EN37");
+        assert_eq!(
+            t.items[0].caller, "K1ABC",
+            "CQ sorts before locator exchanges"
+        );
+        for (i, c) in t.items.iter().enumerate() {
+            assert_eq!(c.display_slot, i);
+        }
     }
     #[test]
     fn cq_and_reversed_pair_progress_without_regressing_on_retries() {

@@ -45,6 +45,8 @@ extern "C" {
         output_id: &str,
         output_label: &str,
         attenuation_db: f32,
+        auto_remove: bool,
+        cq_timeout_seconds: u32,
     ) -> String;
     #[wasm_bindgen(js_name = setTransmitAttenuation)]
     fn set_attenuation(tx: &JsValue, attenuation_db: f32);
@@ -71,6 +73,16 @@ struct Preferences {
     output_id: String,
     output_label: String,
     attenuation_db: f32,
+    #[serde(default = "default_auto_remove")]
+    auto_remove: bool,
+    #[serde(default = "default_cq_timeout")]
+    cq_timeout_seconds: u32,
+}
+fn default_auto_remove() -> bool {
+    true
+}
+fn default_cq_timeout() -> u32 {
+    180
 }
 #[derive(Clone, Deserialize)]
 struct Output {
@@ -78,7 +90,11 @@ struct Output {
     label: String,
 }
 fn preferences() -> Preferences {
-    serde_json::from_str(&load_preferences()).unwrap_or_default()
+    serde_json::from_str(&load_preferences())
+        .unwrap_or_else(|_| serde_json::from_str("{}").expect("default preferences"))
+}
+pub fn saved_grid() -> String {
+    preferences().grid
 }
 pub fn saved_callsign() -> String {
     preferences().callsign
@@ -88,11 +104,18 @@ pub fn saved_callsign() -> String {
 pub fn StationsToContact(
     queue: RwSignal<StationQueue>,
     mine: RwSignal<String>,
+    grid: RwSignal<String>,
     radio: RadioControl,
     running: ReadSignal<bool>,
 ) -> impl IntoView {
     let prefs = preferences();
-    let grid = RwSignal::new(prefs.grid);
+    let auto_remove = RwSignal::new(prefs.auto_remove);
+    let cq_timeout = RwSignal::new(if prefs.cq_timeout_seconds > 0 {
+        prefs.cq_timeout_seconds
+    } else {
+        default_cq_timeout()
+    });
+
     let output_id = RwSignal::new(prefs.output_id);
     let output_label = RwSignal::new(prefs.output_label);
     let attenuation = RwSignal::new(if prefs.attenuation_db.is_finite() {
@@ -111,6 +134,8 @@ pub fn StationsToContact(
             &output_id.get(),
             &output_label.get(),
             attenuation.get(),
+            auto_remove.get(),
+            cq_timeout.get(),
         ));
     });
     let refresh_outputs = move |permission| {
@@ -248,6 +273,9 @@ pub fn StationsToContact(
         let now = js_sys::Date::now();
         if (now / 1000.0).floor() != (clock.get_untracked() / 1000.0).floor() {
             clock.set(now);
+            if running.get_untracked() && auto_remove.get_untracked() {
+                queue.update(|q| q.expire_waiting(now, cq_timeout.get_untracked()));
+            }
         }
         let active = tx.with_value(transmitter_busy);
         playing.set(tx.with_value(transmitter_playing));
@@ -308,6 +336,7 @@ pub fn StationsToContact(
         let Some(plan) = plan else {
             return;
         };
+        queue.update(|q| q.record_frequency(plan.id, radio.frequency()));
         let samples = match transmit::audio(&plan.message, plan.frequency_hz) {
             Ok(pcm) => pcm,
             Err(e) => {
@@ -349,8 +378,23 @@ pub fn StationsToContact(
     }));
     view! {
         <section class="stations-panel results" aria-label="Stations to contact">
-            <div class="toolbar"><h2>"Stations to contact"</h2><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+            <div class="toolbar"><h2>"Stations to contact"</h2><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+            <div class="card-sort" aria-label="Sort stations to contact">
+                <span>"Sort once:"</span>
+                <button class="secondary" on:click=move |_| queue.update(|q| q.sort(crate::geography::CardSort::Signal, &grid.get_untracked()))>"Signal ↓"</button>
+                <button class="secondary" on:click=move |_| queue.update(|q| q.sort(crate::geography::CardSort::State, &grid.get_untracked()))>"State · CQ first"</button>
+                <button class="secondary" disabled=move || crate::geography::Location::parse(&grid.get()).is_none() on:click=move |_| queue.update(|q| q.sort(crate::geography::CardSort::Distance, &grid.get_untracked()))>"Distance ↑"</button>
+                <span>"Active exchange stays first · strongest / CQ first / nearest"</span>
+            </div>
             <p>"Click a conversation below to move that station here. Start contacting enables CQ-triggered calls and the ensuing exchange. Queued frequencies are searched first; full-band decoding continues. One station at a time; stations in other contacts wait for a fresh CQ."</p>
+            <div class="transmit-settings">
+                <label><input type="checkbox" prop:checked=move || auto_remove.get()
+                    on:change=move |ev| auto_remove.set(event_target_checked(&ev)) />"Automatically remove stations without CQ"</label>
+                <label>"CQ timeout (seconds)"<input type="number" min="1" step="1"
+                    prop:value=move || cq_timeout.get() disabled=move || !auto_remove.get()
+                    on:change=move |ev| cq_timeout.set(event_target_value(&ev).parse::<u32>().ok().filter(|s| *s > 0).unwrap_or(180)) /></label>
+            </div>
+            <p>"Measured from the last CQ's end while receiving. Active exchanges are kept; stations with no CQ get a full timeout."</p>
             <details class="queue-settings" open><summary>"Station and transmit settings"</summary>
             <div class="transmit-settings">
                 <label>"My callsign"<input prop:value=move || mine.get() disabled=move || busy.get() || preparing.get() || queue.with(|q| q.enabled)
@@ -409,7 +453,7 @@ pub fn StationsToContact(
                     let transmitting = Signal::derive(move || pending.get().is_some() && playing.get());
                     let stages = Signal::derive(move || queue.with(|q| q.exchange_slots(&stage_call, clock.get())));
                     let rank_call = call.clone();
-                    let back_call = call.clone(); let remove_call = call.clone(); let again_call = call.clone();
+                    let front_call = call.clone(); let back_call = call.clone(); let remove_call = call.clone();
                     view! {
                         <article class="queued-station" data-station=call.clone() class:active=move || contact.get().is_some()
                             class:transmitting=move || transmitting.get()
@@ -431,8 +475,10 @@ pub fn StationsToContact(
                             })}</p>
                             <p class="station-match">{move || station.with(|s| format!("TX matches {:.1} Hz · report {:+03} dB from received SNR", s.frequency_hz, s.snr_db.round().clamp(-50.0,49.0) as i32))}</p>
                             <p class="station-observation">{move || station.with(|s| if s.latest_text.is_empty() { "No current-session evidence yet".into() } else { format!("Last heard: {:+.1} dB · {:.0} audio Hz", s.snr_db, s.frequency_hz) })}</p>
+                            <p class="station-location">{move || station.with(|s| crate::geography::description(s.location.as_ref().map(|(_, l)| l), &grid.get()))}</p>
                             <p class="message">{move || station.get().latest_text}</p>
                             <p>{move || station.get().note}</p>
+                            <p>{move || format!("Contact tries: {} · successful initial-call audio; RF not confirmed", station.get().contact_tries)}</p>
                             <p class="station-tx-status" role="status">{move || pending.get().map(|p| format!("{} · {}", if transmitting.get() { "TX AUDIO ON" } else { "TX queued / finishing" }, p.message)).unwrap_or_else(|| if contact.get().is_some() { "Listening · waiting for partner’s reply".into() } else { String::new() })}</p>
                             <crate::exchange_ui::ExchangeStages slots=stages />
                             <ol class="transmit-steps" aria-label="Our contact sequence">
@@ -449,15 +495,15 @@ pub fn StationsToContact(
                             <p class="tx-state-legend">"Pulsing amber: transmitting audio · Steady cyan: sent audio. Local playback does not confirm RF delivery."</p>
                             <details><summary>"Received evidence"</summary><ul>{move || station.get().evidence.into_iter().map(|m| view! { <li class="message">{m}</li> }).collect_view()}</ul></details>
                             <div class="station-actions">
+                                <button class="secondary" on:click=move |_| queue.update(|q| q.to_front(&front_call))>"Move to front"</button>
                                 <button class="secondary" on:click=move |_| queue.update(|q| q.to_back(&back_call))>"Move to back"</button>
                                 <button class="secondary" on:click=move |_| queue.update(|q| q.remove(&remove_call))>"Remove"</button>
-                                <button class="secondary" hidden=move || !station.get().completed on:click=move |_| queue.update(|q| q.again(&again_call))>"Queue again"</button>
                             </div>
                         </article>
                     }
                 } />
             </div>
-            <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. Unanswered stages retry at most three times; attempts stop after eight transmissions or three minutes. Removing or moving an active station cancels its attempt. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
+            <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. After four initial calls with no reply, the station moves to the back and waits for a fresh CQ. Later stages allow three transmissions; attempts stop after eight transmissions or three minutes. Removing or moving an active station to the back cancels its attempt. Move to front and sorting keep the current exchange active. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
         </section>
     }
 }

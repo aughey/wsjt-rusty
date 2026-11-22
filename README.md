@@ -174,7 +174,7 @@ gray stale. This reuses the waterfall message palette. RR73 uses the sign-off
 color even though it fills the acknowledgment stage. Retries do not regress the
 color; stale contacts regain their progress color when activity resumes.
 
-Activity never sorts contacts or changes tile size. Expiry leaves a vacant grid
+Activity never automatically sorts contacts or changes tile size. Signal, State and Distance sort once (strongest, CQ first and nearest caller); later activity keeps the chosen cells. Unknown distances sort last. Expiry leaves a vacant grid
 cell, and new contacts reuse vacancies without shifting survivors. Resizing the
 viewport adjusts the column count. At the 200-contact limit, the least recently
 heard contact is replaced. The board accommodates many contacts on a page;
@@ -202,9 +202,18 @@ priority, the latest received message, SNR/audio frequency, our exchange stage,
 recent received evidence, the last CQ age, decode-arrival delay/deadline
 status and the most recent local transmit status. Other
 conversations keep their original grid cells. **Move to back** lowers a station's
-priority and cancels its active attempt; **Remove** takes it out of the queue.
+priority and cancels its active attempt; **Move to front** prioritizes a waiting station. An active exchange moves to the front and stays there through sorting or prioritization of waiting cards. **Remove** takes it out of the queue.
 If the conversation is still retained, removing a station makes it visible on
 the conversation board again. The queue holds at most 100 unique stations.
+
+**Automatically remove stations without CQ** is on by default with a configurable
+**CQ timeout (seconds)** of 180 (three minutes), saved per browser/site. While
+receiving, waiting stations expire from the end of their last CQ; stations not
+yet heard get a full timeout. Active exchanges are retained. Each card records
+successful initial-call audio as **Contact tries**. After four initial calls with
+no response, the attempt ends after its final reply window and the station moves
+to the back, waiting for a fresh CQ. Failed/canceled audio does not count; these
+counts do not confirm RF delivery. Counts reset on capture restart or removal.
 
 Enter your callsign/grid and choose **Transmit audio output**, then connect and
 configure the radio/PTT method. **Start contacting** prepares the selected audio
@@ -229,11 +238,11 @@ A CQ response uses the immediately following 15-second UTC slot at +0.5 s. One
 exchange runs at a time. Replies addressed from that station to our callsign
 advance locator, report, roger-report, RR73 and closing 73; subsequent transmissions
 use our alternating slots. Received SNR supplies the report automatically; each transmission uses the
-partner’s latest decoded lowest-tone audio frequency. Each unanswered stage has at most three attempts;
+partner’s latest decoded lowest-tone audio frequency. Initial calls allow four tries
+with no response; later unanswered stages allow three transmissions;
 an exchange stops after eight transmissions or three minutes. Exhausted attempts
 move to the back and wait for a new CQ. If the station answers someone else,
-its attempt is canceled and it waits for another CQ. Completed entries remain
-visible; **Queue again** waits for a new CQ before another attempt. Local audio
+its attempt is canceled and it waits for another CQ. Completed entries leave the queue automatically and retain their contact log. **Remove all** clears and disarms the queue without deleting log records. Local audio
 and received evidence remain separate; a sent 73 does not prove RF delivery or
 mutual QSO completion.
 
@@ -490,3 +499,57 @@ Steven Franke, K9AN, and the WSJT development team. The Fano decoder derives
 from Phil Karn, KA9Q (1994), with Taylor's modifications. The hash implementation
 derives from Bob Jenkins' public-domain lookup3 algorithm through WSJT-X.
 See `LICENSE`; dependencies retain their own licenses.
+
+### Contact locations and world map
+
+Cards show decoded Maidenhead grid centers and approximate great-circle distances
+in kilometers from **My grid**. Conversation hover/focus details include each
+heard participant's grid and east-positive longitude / north-positive latitude.
+Only ordinary CQ and locator exchanges supply locations. Locations survive
+message trimming while their card is retained; input restart clears observations.
+Four-character grids cover a large area, so these are approximate positions.
+
+Both lists have one-shot Signal, State and Distance sort buttons. Queue sorting
+changes waiting-station priority; an active exchange remains first. Selecting a
+conversation puts its caller at the front of the waiting queue. Card movement animations are disabled. State sorting puts CQ first.
+
+**Open map** displays a pan/zoom world map using bundled OpenLayers 10.10.0 and
+OpenStreetMap tiles. Great-circle lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or local attempts. Colors follow received stages; a white home marker uses
+My grid. Select a marker for callsign, grid, coordinates and distance. Unknown
+grids are omitted. Opening the optional map makes external tile requests to
+OpenStreetMap, with visible attribution and normal browser caching. No callsign
+lookup or spot upload is performed.
+
+### Local contact log and ADIF
+
+The Contact log section has Contacts and Evidence tabs, with UTC dates and times,
+our callsign/grid, the partner/grid, software outcome and timestamped evidence.
+Received decodes retain payload, SNR and audio frequency; successful local playback
+is separately labeled TX audio. Failed/canceled playback is never recorded as sent.
+Records begin when an armed queue schedules an attempt, not when a card is selected.
+
+SQLite (vendored sql.js 1.17.0 WASM) runs in a separate worker; IndexedDB commits
+its database image locally for this browser/site. Records survive reloads and
+capture restarts. Storage failures show Retry saving / reload log and retain
+unacknowledged records in the tab. New attempts stop at 200 pending writes until
+saving succeeds. Closing a tab with unsaved records or clearing site data can
+lose them; download backups. There is no server upload or synchronization.
+
+Completed software exchanges automatically leave Stations to contact. Their
+stations get gray, faded, hatched Conversations cards and a Contacted label, also after reload.
+This does not establish RF delivery or mutual QSO completion.
+
+Download ADIF exports completed software exchanges; Include incomplete attempts
+also exports interrupted/in-progress attempts. UTC dates/times, callsigns, known
+grids/reports and application fields for timestamped evidence are retained.
+QSO_COMPLETE is unknown for software completion and incomplete otherwise.
+Connected radio readbacks supply the RF dial frequency in MHz and its query time.
+Only fresh CI-V ReadFrequency results are recorded, never the editable form.
+Disconnected or stale readbacks stay unknown; audio Hz are never exported as RF.
+Importers can derive the band from the queried RF frequency. See
+[contact-log implementation notes](docs/contact-log.md) for storage and validation.
+
+Conversations offers **Add all CQ stations** and **Automatically add new CQ stations**.
+Both exclude previously completed contacts, our own station, queued stations and
+stale or ongoing exchanges. Auto-add applies only to newly decoded CQs, starts
+off on every page load and is never saved. Adding stations does not arm transmit.

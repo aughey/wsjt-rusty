@@ -237,7 +237,14 @@ pub fn App() -> impl IntoView {
     let (progress, set_progress) = signal("No audio captured".to_owned());
     let (rows, set_rows) = signal(Vec::<Row>::new());
     let radio_control = crate::radio::RadioControl::new();
-    let contact_queue = RwSignal::new(crate::contact_queue::StationQueue::default());
+    let mut queue_state = crate::contact_queue::StationQueue::default();
+    queue_state.log_session = format!("{:.0}-{}", js_sys::Date::now(), js_sys::Math::random());
+    let contact_queue = RwSignal::new(queue_state);
+    let contacted = RwSignal::new(Vec::<String>::new());
+    let contact_history_ready = RwSignal::new(false);
+    // Deliberately session-only: never restore or save this opt-in.
+    let auto_add_cq = RwSignal::new(false);
+    let my_grid = RwSignal::new(crate::transmit_ui::saved_grid());
     let my_call = RwSignal::new(crate::transmit_ui::saved_callsign());
     let (conversations, set_conversations) = signal(Conversations::default());
     let (hovered_contact, set_hovered_contact) = signal(None::<u64>);
@@ -252,6 +259,49 @@ pub fn App() -> impl IntoView {
                 .cloned()
         })
     });
+    let add_cqs = move |fresh: Option<&[Row]>| {
+        if !contact_history_ready.get_untracked() {
+            return;
+        }
+        conversations.with_untracked(|t| {
+            contact_queue.update(|q| {
+                let added = contacted.with_untracked(|calls| {
+                    q.add_cq_stations(
+                        t.items.iter().filter(|c| {
+                            fresh.is_none_or(|rows| {
+                                rows.iter().any(|r| {
+                                    r.end_utc_ms == c.last_ms
+                                        && crate::message_kind::classify(&r.message, &r.payload)
+                                            == MessageKind::Cq
+                                        && r.message.split_whitespace().any(|word| word == c.caller)
+                                })
+                            })
+                        }),
+                        t.now_ms,
+                        calls,
+                        &my_call.get_untracked(),
+                    )
+                });
+                if added > 0 {
+                    rows.with_untracked(|rows| {
+                        let mut sorted: Vec<_> = rows.iter().collect();
+                        sorted.sort_by(|a, b| a.start_utc_ms.total_cmp(&b.start_utc_ms));
+                        for r in sorted {
+                            q.hear(
+                                &my_call.get_untracked(),
+                                r.start_utc_ms,
+                                &r.message,
+                                &r.payload,
+                                r.snr_db,
+                                r.frequency_hz,
+                            );
+                            q.record_arrival(r.start_utc_ms, &r.message, r.received_at_ms);
+                        }
+                    });
+                }
+            })
+        });
+    };
     let ingest = move |incoming: Vec<Row>, processed_ms: Option<f64>| {
         let mut fresh = Vec::new();
         set_rows.update(|history| {
@@ -296,6 +346,9 @@ pub fn App() -> impl IntoView {
                 }),
             )
         });
+        if auto_add_cq.get_untracked() {
+            add_cqs(Some(&fresh));
+        }
         contact_queue.update(|q| {
             for r in &fresh {
                 q.hear(
@@ -707,9 +760,23 @@ pub fn App() -> impl IntoView {
                     <div><dt>{move || if running.get() { "Audio through (UTC)" } else { "Capture end (UTC)" }}</dt><dd>{move || capture_end.get()}</dd></div>
                 </dl>
             </section>
-            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call radio=radio_control running=running />
+            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running />
+            <crate::contact_map::ContactMap conversations=conversations queue=contact_queue grid=my_grid mine=my_call />
             <section class="results conversation-board" aria-label="FT8 conversations">
                 <div class="toolbar"><h2>"Conversations"</h2><span class="rate">{move || format!("{} tracked", conversations.with(|t| t.items.len()))}</span></div>
+                <div class="card-sort" aria-label="Add CQ stations">
+                    <button class="secondary" disabled=move || !contact_history_ready.get() on:click=move |_| add_cqs(None)>"Add all CQ stations"</button>
+                    <label><input type="checkbox" prop:checked=move || auto_add_cq.get()
+                        on:change=move |event| auto_add_cq.set(event_target_checked(&event)) />" Automatically add new CQ stations"</label>
+                    <span>"Previously contacted stations are excluded. Auto-add starts off on every page load."</span>
+                </div>
+                <div class="card-sort" aria-label="Sort conversations">
+                    <span>"Sort once:"</span>
+                    <button class="secondary" on:click=move |_| set_conversations.update(|c| c.sort(crate::geography::CardSort::Signal, &my_grid.get_untracked()))>"Signal ↓"</button>
+                    <button class="secondary" on:click=move |_| set_conversations.update(|c| c.sort(crate::geography::CardSort::State, &my_grid.get_untracked()))>"State · CQ first"</button>
+                    <button class="secondary" disabled=move || crate::geography::Location::parse(&my_grid.get()).is_none() on:click=move |_| set_conversations.update(|c| c.sort(crate::geography::CardSort::Distance, &my_grid.get_untracked()))>"Distance ↑"</button>
+                    <span>"Strongest / CQ first / nearest caller · unknown distances last"</span>
+                </div>
                 <div class="exchange-state-legend" aria-label="Conversation colors and exchange stage appearance">
                     {[(MessageKind::Cq, "CQ"), (MessageKind::Reply, "Reply"), (MessageKind::Report, "Report"),
                         (MessageKind::RogerReport, "R-report"), (MessageKind::Acknowledgment, "RRR"),
@@ -729,11 +796,17 @@ pub fn App() -> impl IntoView {
                         let contact = Signal::derive(move || conversations.with(|t|
                             t.items.iter().find(|c| c.id == id).cloned()).unwrap_or_else(|| initial.clone()));
                         let status = Signal::derive(move || contact.get().status(conversations.with(|t| t.now_ms)));
+                        let previously_contacted = Signal::derive(move || contact.with(|c| {
+                            let matches = |call: &str| c.caller == call || c.partner.as_deref() == Some(call);
+                            contacted.with(|calls| calls.iter().any(|call| matches(call)))
+                                || contact_queue.with(|q| q.was_contacted(&c.caller, &[]) || c.partner.as_ref().is_some_and(|p| q.was_contacted(p, &[])))
+                        }));
                         view! {
                             <article class="conversation" tabindex="0" role="button" data-conversation-id=id
                                 style=move || contact.with(|c| format!("{}--conversation-color:{};", tile_position(c.display_slot), c.color(conversations.with(|t| t.now_ms))))
+                                class:contacted=move || previously_contacted.get()
                                 class:inactive=move || matches!(status.get(), "Stale" | "Sign-off heard")
-                                aria-label=move || format!("{} · {}. {}", contact.get().label(), status.get(), contact.get().expectation(conversations.with(|t| t.now_ms)))
+                                aria-label=move || format!("{} · {}. {} {}", contact.get().label(), status.get(), contact.get().expectation(conversations.with(|t| t.now_ms)), if previously_contacted.get() { "Contacted previously; logged software exchange." } else { "" })
                                 aria-describedby="conversation-tooltip"
                                 on:mouseenter=move |_| set_hovered_contact.set(Some(id))
                                 on:mouseleave=move |_| set_hovered_contact.set(None)
@@ -743,7 +816,9 @@ pub fn App() -> impl IntoView {
                                     let c = contact.get_untracked();
                                     let target = if c.caller == my_call.get_untracked() { c.partner.clone().unwrap_or(c.caller.clone()) } else { c.caller.clone() };
                                     contact_queue.update(|q| {
-                                        q.add(target);
+                                        q.add(target.clone());
+                                        if let Some(s) = q.items.iter_mut().find(|s| s.call == target) { s.location = c.locations.get(&target).cloned(); }
+                                        q.to_front(&target);
                                         rows.with_untracked(|rows| { let mut sorted: Vec<_> = rows.iter().collect(); sorted.sort_by(|a,b| a.start_utc_ms.total_cmp(&b.start_utc_ms)); for r in sorted { q.hear(&my_call.get_untracked(), r.start_utc_ms, &r.message, &r.payload, r.snr_db, r.frequency_hz); q.record_arrival(r.start_utc_ms, &r.message, r.received_at_ms); } });
                                     });
                                     set_hovered_contact.set(None); set_focused_contact.set(None);
@@ -757,7 +832,10 @@ pub fn App() -> impl IntoView {
                                     </span>
                                 </div>
                                 <crate::exchange_ui::ExchangeStages slots=Signal::derive(move || contact.get().exchange_slots(conversations.with(|t| t.now_ms))) />
-                                <span class="conversation-state">{move || match status.get() { "Stale" => "Stale", "Sign-off heard" => "Ended", _ => "" }}</span>
+                                <span class="conversation-state" title=move || contact.with(|c| crate::geography::description(c.location(), &my_grid.get()))>{move || contact.with(|c| {
+                                    let place = c.location().map(|l| crate::geography::Location::parse(&my_grid.get()).map(|home| format!("{} ≈{:.0} km", l.grid, home.distance_km(l))).unwrap_or_else(|| l.grid.clone())).unwrap_or_else(|| "Grid unknown".into());
+                                    format!("{}{} · {}", if previously_contacted.get() { "Contacted · " } else { "" }, status.get(), place)
+                                })}</span>
                             </article>
                         }
                     } />
@@ -767,6 +845,7 @@ pub fn App() -> impl IntoView {
                         {move || selected_contact.get().map(|contact| view! {
                             <strong>{contact.label()}</strong>
                             <span>{contact.status(conversations.with(|t| t.now_ms))}</span>
+                            {contact.locations.iter().map(|(call, (_, l))| view! { <p>{format!("{} · {}", call, crate::geography::description(Some(l), &my_grid.get()))}</p> }).collect_view()}
                             <p class="exchange-expectation">{contact.expectation(conversations.with(|t| t.now_ms))}</p>
                             <p class="inference" hidden=!contact.inferred>{contact.inference_note()}</p>
                             <span class="tooltip-evidence-label">"Recent received messages"</span>
@@ -777,6 +856,7 @@ pub fn App() -> impl IntoView {
                     </div>
                 </Show>
             </section>
+            <crate::contact_log_ui::ContactLog queue=contact_queue contacted=contacted ready=contact_history_ready />
             <section class="results" aria-label="FT8 decodes">
                 <div class="toolbar"><h2>"Decoded messages"</h2><span class="rate">{move || format!("{} shown · latest 500", rows.get().len())}</span></div>
                 <p class="empty" hidden=move || !rows.get().is_empty()>"Messages appear after a decode attempt. Tune your receiver to FT8 and route its audio to this input."</p>
