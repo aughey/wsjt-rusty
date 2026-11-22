@@ -1,0 +1,66 @@
+Loaded 120.000s of audio at 12000 Hz
+Decode pass 1 of 2
+Searching 3739 Costas candidates
+At -3s: 0 messages
+At 15s: 14 messages
+Decode pass 2 of 2
+Searching 3358 Costas candidates
+At -3s: 0 messages
+At 15s: 3 messages
+Decode pass 1 of 2
+Searching 3714 Costas candidates
+At -3s: 0 messages
+At 15s: 17 messages
+Decode pass 2 of 2
+Searching 3470 Costas candidates
+At -3s: 0 messages
+At 15s: 3 messages
+Decode pass 1 of 2
+Searching 3727 Costas candidates
+At -3s: 0 messages
+At 15s: 14 messages
+Decode pass 2 of 2
+Searching 3272 Costas candidates
+At -3s: 0 messages
+At 15s: 2 messages
+Decode pass 1 of 2
+Searching 3732 Costas candidates
+At -3s: 0 messages
+At 15s: 14 messages
+Decode pass 2 of 2
+Searching 3653 Costas candidates
+At -3s: 0 messages
+At 15s: 3 messages
+Decode pass 1 of 2
+Searching 3709 Costas candidates
+At -3s: 0 messages
+At 15s: 10 messages
+Decode pass 2 of 2
+Searching 3601 Costas candidates
+At -3s: 0 messages
+At 15s: 3 messages
+Decode pass 1 of 2
+Searching 3726 Costas candidates
+At -3s: 0 messages
+At 15s: 13 messages
+Decode pass 2 of 2
+Searching 3384 Costas candidates
+At -3s: 0 messages
+At 15s: 3 messages
+Decode pass 1 of 2
+Searching 3730 Costas candidates
+At -3s: 0 messages
+At 15s: 11 messages
+Decode pass 2 of 2
+Searching 3616 Costas candidates
+At -3s: 0 messages
+At 15s: 2 messages
+Decode pass 1 of 2
+Searching 1330 Costas candidates
+At -3s: 0 messages
+Decode pass 2 of 2
+Searching 1331 Costas candidates
+At -3s: 0 messages
+FT8 transmission phase: 3.456s modulo 15s; estimated slot boundary 2.956s (nominal 0.5s TX delay)
+Decoded 121 transmissions from 120.000s of audio
+Elapsed seconds: 32.76

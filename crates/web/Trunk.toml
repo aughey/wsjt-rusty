@@ -1,0 +1,9 @@
+[build]
+target = "index.html"
+dist = "dist"
+# The module worker imports this same WASM module by its stable generated name.
+filehash = false
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080

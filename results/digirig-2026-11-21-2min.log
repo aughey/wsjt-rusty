@@ -1,0 +1,24 @@
+Loaded 120.000s of audio at 12000 Hz
+Decode pass 1 of 2
+Searching 18115 Costas candidates
+At -3s: 0 messages
+At 15s: 14 messages
+At 30s: 31 messages
+At 45s: 45 messages
+At 60s: 59 messages
+At 75s: 69 messages
+At 90s: 82 messages
+At 105s: 93 messages
+Decode pass 2 of 2
+Searching 16669 Costas candidates
+At -3s: 0 messages
+At 15s: 3 messages
+At 30s: 6 messages
+At 45s: 8 messages
+At 60s: 11 messages
+At 75s: 14 messages
+At 90s: 17 messages
+At 105s: 19 messages
+Decoded 121 transmissions
+Estimated transmission phase: 3.455s modulo 15s (slot boundary approximately 2.955s; assumes nominal 0.5s TX delay)
+Elapsed seconds: 24.67

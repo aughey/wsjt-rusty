@@ -1,0 +1,11 @@
+[package]
+name = "wsjt-rusty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+wsjt-audio.workspace = true
+wsjt-ft8.workspace = true
+wsjt-wspr.workspace = true

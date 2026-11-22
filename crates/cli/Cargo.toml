@@ -1,0 +1,14 @@
+[package]
+name = "wsjt-rusty-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+wsjt-audio.workspace = true
+wsjt-rusty.workspace = true
+
+[[bin]]
+name = "wsjt-rusty"
+path = "src/main.rs"

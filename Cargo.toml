@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dsp",
+    "crates/audio",
+    "crates/ft8",
+    "crates/wspr",
+    "crates/decoder",
+    "crates/cli",
+    "crates/web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+gloo-render = "0.3"
+gloo-timers = "0.3"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "AnalyserNode", "AudioContext", "AudioNode", "AudioContextState",
+    "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "MediaDevices",
+    "MediaStream", "MediaStreamAudioSourceNode", "MediaStreamConstraints",
+    "MediaStreamTrack", "MediaTrackConstraints", "Navigator", "Window",
+] }
+hound = "3.5"
+libm = "0.2"
+rustfft = "6.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wsjt-dsp = { path = "crates/dsp" }
+wsjt-audio = { path = "crates/audio" }
+wsjt-ft8 = { path = "crates/ft8" }
+wsjt-wspr = { path = "crates/wspr" }
+wsjt-rusty = { path = "crates/decoder" }
