@@ -34,12 +34,14 @@ ADIF follows the [3.1.7 specification](https://www.adif.org/317/ADIF_317.htm).
 Exports include dates across UTC midnight, callsigns, FT8 mode, known grids and
 directed sent/received reports. Application fields preserve record ID, outcome,
 and ASCII-escaped JSON timestamped evidence. `QSO_COMPLETE` is `?` for software
-completion and `N` otherwise. RF `FREQ` uses a fresh CI-V ReadFrequency result from the radio's serialized
-background queries, in MHz (FT8 dial convention). The query UTC is retained with
-the record and as an ADIF application field. It is sampled when an attempt first
-has a readback no older than five seconds, without adding a transaction ahead of
-timed PTT. Disconnected/stale/missing radio readbacks remain unknown. The editable
-frequency form and audio Hz are never substituted; BAND is left for importers to
+completion and `N` otherwise. RF `FREQ` uses a CI-V ReadFrequency result in MHz
+(FT8 dial convention). A completed exchange requests a new dial readback when
+the connected radio is idle, with at least three seconds before the next slot.
+The result updates the archived contact by ID, including after its initial save.
+The query UTC is retained in the record and an ADIF application field. Attempts
+also retain their first fresh background readback (at most five seconds old) as
+a fallback. Disconnected or failed queries never substitute the editable form
+or audio Hz; missing readbacks remain unknown. BAND is left for importers to
 derive from FREQ. QSL confirmation is not fabricated.
 Only completed records export by default; incomplete attempts are opt-in.
 

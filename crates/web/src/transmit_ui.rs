@@ -265,7 +265,7 @@ pub fn StationsToContact(
     };
     // Audio input Stop/restart also disarms the queue, including output preparation.
     Effect::new(move |_| {
-        if !running.get() || !visible.get() {
+        if !running.get() {
             stop();
         }
     });
@@ -301,12 +301,12 @@ pub fn StationsToContact(
             }
         });
     };
+    let frequency_queries = StoredValue::new_local(std::collections::BTreeSet::<String>::new());
+    let frequency_query_busy = RwSignal::new(false);
     let timer = StoredValue::new_local(None::<Interval>);
     Effect::new(move |_| {
         timer.update_value(|timer| *timer = None);
-        if !visible.get() {
-            return;
-        }
+        // Session scheduling continues while other application pages are open.
         timer.set_value(Some(Interval::new(100, move || {
             let now = js_sys::Date::now();
             if (now / 1000.0).floor() != (clock.get_untracked() / 1000.0).floor() {
@@ -340,8 +340,37 @@ pub fn StationsToContact(
                     status.set(tx.with_value(transmitter_status));
                 }
             }
+            // Leave at least three seconds before the next slot's keying deadline.
+            // Completed records survive queue removal and asynchronous persistence.
+            if !active
+                && radio.contact_frequency_ready()
+                && !frequency_query_busy.get_untracked()
+                && now.rem_euclid(15_000.0) < 12_000.0
+            {
+                let completed = queue.with_untracked(StationQueue::completed_record_ids);
+                frequency_queries.update_value(|ids| ids.retain(|id| completed.contains(id)));
+                let next = completed
+                    .into_iter()
+                    .find(|id| !frequency_queries.with_value(|ids| ids.contains(id)));
+                if let Some(id) = next {
+                    frequency_queries.update_value(|ids| {
+                        ids.insert(id.clone());
+                    });
+                    frequency_query_busy.set(true);
+                    spawn_local(async move {
+                        if let Some(sample) = radio.read_contact_frequency().await {
+                            queue.try_update(|q| q.record_completed_frequency(&id, sample));
+                        }
+                        frequency_query_busy.try_set(false);
+                    });
+                }
+            }
             busy.set(active);
-            if active || preparing.get_untracked() || !queue.with_untracked(|q| q.enabled) {
+            if active
+                || frequency_query_busy.get_untracked()
+                || preparing.get_untracked()
+                || !queue.with_untracked(|q| q.enabled)
+            {
                 return;
             }
             if !running.get_untracked() {
@@ -427,7 +456,7 @@ pub fn StationsToContact(
         <section class="contact-configuration results" aria-label="Contact configuration">
             <h2>"Contact configuration"</h2>
             <label><input type="checkbox" prop:checked=move || find_open_frequency.get() on:change=move |ev| find_open_frequency.set(event_target_checked(&ev)) />"find an open frequency"</label>
-            <p>"Uses up to 60 seconds of available waterfall history to choose a quiet 50 Hz transmit space within 100–3000 audio Hz. Each new contact gets a new choice, held through retries and replies. Changes apply to the next contact. This estimates occupancy; it cannot guarantee a clear channel."</p>
+            <p>"Uses up to 60 seconds of available waterfall history to choose a quiet 50 Hz transmit space within 250–2500 audio Hz. Each new contact gets a new choice, held through retries and replies. Changes apply to the next contact. This estimates occupancy; it cannot guarantee a clear channel."</p>
             <p hidden=move || { let _ = clock.get(); !find_open_frequency.get() || playing.get() || queue.with(|q| q.active.is_some()) || crate::open_frequency::recent_choice(open_frequency.get(), js_sys::Date::now()).is_some() }>"Waiting for waterfall data before choosing a transmit frequency."</p>
             <p>"Open Conversations and click a station to move it here. Start contacting enables CQ-triggered calls and the ensuing exchange. Queued frequencies are searched first; full-band decoding continues. One station at a time; stations in other contacts wait for a fresh CQ."</p>
             <div class="transmit-settings">
@@ -437,7 +466,7 @@ pub fn StationsToContact(
                     prop:value=move || cq_timeout.get() disabled=move || !auto_remove.get()
                     on:change=move |ev| cq_timeout.set(event_target_value(&ev).parse::<u32>().ok().filter(|s| *s > 0).unwrap_or(180)) /></label>
             </div>
-            <p>"Measured from the last CQ's end. Checked while Stations is visible and again on return; stations with no CQ get a full timeout."</p>
+            <p>"Measured from the last CQ's end. Checked continuously while listening; stations with no CQ get a full timeout."</p>
 
             <div class="transmit-settings">
                 <label>"My callsign"<input prop:value=move || mine.get() disabled=move || busy.get() || preparing.get() || queue.with(|q| q.enabled)
@@ -465,38 +494,35 @@ pub fn StationsToContact(
 
 
 
-            <div class="tx-level">
-                <label for="tx-attenuation">"TX audio attenuation"</label>
-                <input id="tx-attenuation" type="range" min="0" max="60" step="1" prop:value=move || attenuation.get()
-                    aria-valuetext=move || format!("{} dB attenuation", attenuation.get())
-                    on:input=move |ev| attenuation.set(event_target_value(&ev).parse::<f32>().ok().filter(|db| db.is_finite()).unwrap_or(60.0).clamp(0.0,60.0)) />
-                <output for="tx-attenuation">{move || format!("−{:.0} dB · {:.1}% amplitude", attenuation.get(), 100.0*10.0_f32.powf(-attenuation.get()/20.0))}</output>
-                <p>"Move right to lower the radio’s audio drive. Saved in this browser; set before Start contacting."</p>
-            </div>
             <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. After four initial calls with no reply, the station moves to the back, sorts behind other stations for three minutes and waits for a fresh CQ. Later stages allow three transmissions; attempts stop after eight transmissions or three minutes. Removing or moving an active station to the back cancels its attempt. Move to front and sorting keep the current exchange active. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
         </section>
         </Show>
         <Show when=move || visible.get()>
         <section class="stations-panel results" aria-label="Stations to contact">
-            <div class="toolbar"><h2>"Stations to contact"</h2><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+            <div class="toolbar"><h2>"Stations to contact"</h2><button on:click=move |ev| { if preparing.get() || busy.get() || queue.with(|q| q.enabled) { stop(); } else { start(ev); } }
+                    disabled=move || !(preparing.get() || busy.get() || queue.with(|q| q.enabled)) && (queue.with(|q| q.items.is_empty()) || !running.get() || validation.get().is_err() || !output_supported() || (use_radio.get() && !radio.configured()))>
+                    {move || if preparing.get() || busy.get() || queue.with(|q| q.enabled) { "Stop contacting" } else { "Start contacting" }}
+                </button><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
             <div class="card-sort" aria-label="Sort stations to contact">
-                <span>"Sort each cycle:"</span>
+                <span>"Auto-sort:"</span>
                 <label><input type="checkbox" prop:checked=move || sort_state.get() on:change=move |ev| sort_state.set(event_target_checked(&ev)) />"State · CQ first"</label>
                 <label><input type="checkbox" prop:checked=move || sort_signal.get() on:change=move |ev| sort_signal.set(event_target_checked(&ev)) />"Signal ↓"</label>
                 <label><input type="checkbox" prop:checked=move || sort_distance.get() on:change=move |ev| sort_distance.set(event_target_checked(&ev)) />"Distance ↑"</label>
                 <span>"Active first · penalized last · checked keys: state, signal, distance (set My grid)"</span>
             </div>
-            <p class="transmit-validation">{move || validation.get().err().unwrap_or("")}</p>
-            <div class="toolbar">
-                <button on:click=start disabled=move || preparing.get() || busy.get() || queue.with(|q| q.enabled || q.items.is_empty()) || !running.get() || validation.get().is_err() || !output_supported() || (use_radio.get() && !radio.configured())>"Start contacting"</button>
-                <button class="secondary" on:click=move |_| stop() disabled=move || !preparing.get() && !busy.get() && !queue.with(|q| q.enabled)>"Stop contacting"</button>
-                <strong>{move || if queue.with(|q| q.enabled) { "CQ watch enabled" } else { "Paused" }}</strong>
+            <div class="tx-level">
+                <label for="tx-attenuation">"TX level"</label>
+                <input id="tx-attenuation" type="range" min="0" max="60" step="1" prop:value=move || attenuation.get()
+                    aria-valuetext=move || format!("{} dB attenuation", attenuation.get())
+                    on:input=move |ev| attenuation.set(event_target_value(&ev).parse::<f32>().ok().filter(|db| db.is_finite()).unwrap_or(60.0).clamp(0.0,60.0)) />
+                <output for="tx-attenuation">{move || format!("−{:.0} dB · {:.1}% amplitude", attenuation.get(), 100.0*10.0_f32.powf(-attenuation.get()/20.0))}</output>
             </div>
+            <p class="transmit-validation">{move || validation.get().err().unwrap_or("")}</p>
             <p class="transmit-phase">{move || phase.get()}</p>
             <p role="status">{move || status.get()}</p>
             <p hidden=move || running.get()>"Start listening to watch for CQ calls."</p>
             <p class="empty" hidden=move || !queue.with(|q| q.items.is_empty())>"No stations selected. Click a conversation to add a station."</p>
-            <div class="station-queue">
+            <div class="station-queue" tabindex="0" role="region" aria-label="Queued station cards">
                 <For each=move || queue.with(|q| q.items.clone()) key=|s| s.call.clone() children=move |initial| {
                     let call = initial.call.clone();
                     let card_call = call.clone();
@@ -525,7 +551,7 @@ pub fn StationsToContact(
                                     let delay = ((arrival-start-12640.0)/1000.0).max(0.0);
                                     let deadline = ((start/15000.0).round()+1.0)*15000.0+300.0;
                                     if arrival > deadline { format!("Decoded {delay:.1} s after CQ ended · reply deadline missed by {:.1} s", (arrival-deadline)/1000.0) }
-                                    else { format!("Decoded {delay:.1} s after CQ ended · received before reply deadline") }
+                                    else { format!("Decoded {delay:.1} s after CQ ended") }
                                 }
                                 _ => String::new(),
                             })}</p>
@@ -536,30 +562,38 @@ pub fn StationsToContact(
                             <p class="station-match">{move || station.with(|s| {
                                 let chosen = queue.with(|q| q.active.as_ref().filter(|a| a.contact.target == s.call).and_then(|a| a.transmit_frequency_hz));
                                 let placement = match chosen {
-                                    Some(hz) => format!("TX {hz:.1} Hz · held open-frequency choice"),
-                                    None if find_open_frequency.get() && contact.get().is_none() => "TX pending · open frequency chosen when contact starts".into(),
-                                    None => format!("TX {:.1} Hz · matches received audio", s.frequency_hz),
+                                    Some(hz) => format!("TX {hz:.1} Hz"),
+                                    None if find_open_frequency.get() && contact.get().is_none() => "TX pending".into(),
+                                    None => format!("TX {:.1} Hz", s.frequency_hz),
                                 };
-                                format!("{placement} · report {:+03} dB from received SNR", s.snr_db.round().clamp(-50.0,49.0) as i32)
+                                format!("{placement} · report {:+03} dB", s.snr_db.round().clamp(-50.0,49.0) as i32)
                             })}</p>
                             <p class="station-observation">{move || station.with(|s| if s.latest_text.is_empty() { "No current-session evidence yet".into() } else { format!("Last heard: {:+.1} dB · {:.0} audio Hz", s.snr_db, s.frequency_hz) })}</p>
                             <p class="station-location">{move || station.with(|s| crate::geography::description(s.location.as_ref().map(|(_, l)| l), &grid.get()))}</p>
                             <p class="message">{move || station.get().latest_text}</p>
                             <p>{move || station.get().note}</p>
-                            <p>{move || format!("Contact tries: {} · successful initial-call audio; RF not confirmed", station.get().contact_tries)}</p>
+                            <p>{move || format!("Contact tries: {}", station.get().contact_tries)}</p>
                             <p class="station-tx-status" role="status">{move || pending.get().map(|p| format!("{} · {}", if transmitting.get() { "TX AUDIO ON" } else { "TX queued / finishing" }, p.message)).unwrap_or_else(|| if contact.get().is_some() { "Listening · waiting for partner’s reply".into() } else { String::new() })}</p>
-                            <crate::exchange_ui::ExchangeStages slots=stages />
-                            <ol class="transmit-steps" aria-label="Our contact sequence">
-                                {["Locator", "Report", "R-report", "RR73", "73"].into_iter().enumerate().map(|(step, label)| view! {
-                                    <li class:current=move || contact.with(|c| c.as_ref().is_some_and(|c| c.step == step))
-                                        class:transmitting=move || transmitting.get() && pending.with(|p| p.as_ref().is_some_and(|p| p.step == step))
-                                        class:sent=move || station.with(|s| s.sent_messages[step].is_some())>
-                                        <span>{label}</span>
-                                        <strong class="tx-step-status">{move || if transmitting.get() && pending.with(|p| p.as_ref().is_some_and(|p| p.step == step)) { "● Transmitting" } else if pending.with(|p| p.as_ref().is_some_and(|p| p.step == step)) { "Queued / finishing" } else if station.with(|s| s.sent_messages[step].is_some()) { "✓ Sent audio" } else if contact.with(|c| c.as_ref().is_some_and(|c| c.step == step)) { "Next reply" } else { "Not sent" }}</strong>
-                                        <span class="tx-step-message">{move || pending.get().filter(|p| p.step == step).map(|p| p.message).or_else(|| station.get().sent_messages[step].clone()).unwrap_or_default()}</span>
-                                    </li>
-                                }).collect_view()}
-                            </ol>
+                            <crate::exchange_ui::ExchangeStages slots=stages transmit=Signal::derive(move || {
+                                let pending = pending.get();
+                                let transmitting = transmitting.get();
+                                let station = station.get();
+                                let contact = contact.get();
+                                std::iter::once(crate::exchange_ui::TransmitStage::default()).chain((0..5).map(|step| {
+                                    let pending = pending.as_ref().filter(|p| p.step == step);
+                                    let sent = station.sent_messages[step].as_ref();
+                                    crate::exchange_ui::TransmitStage {
+                                        status: if transmitting && pending.is_some() { "Transmitting" }
+                                            else if pending.is_some() { "Queued / finishing" }
+                                            else if sent.is_some() { "Sent audio" }
+                                            else if contact.as_ref().is_some_and(|c| c.step == step) { "Next reply" }
+                                            else { "" }.into(),
+                                        message: pending.map(|p| p.message.clone()).or_else(|| sent.cloned()).unwrap_or_default(),
+                                        transmitting: transmitting && pending.is_some(),
+                                        sent: sent.is_some(),
+                                    }
+                                })).collect()
+                            }) />
                             <p class="tx-state-legend">"Pulsing amber: transmitting audio · Steady cyan: sent audio. Local playback does not confirm RF delivery."</p>
                             <details><summary>"Received evidence"</summary><ul>{move || station.get().evidence.into_iter().map(|m| view! { <li class="message">{m}</li> }).collect_view()}</ul></details>
                             <div class="station-actions">

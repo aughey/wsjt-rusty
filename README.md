@@ -21,6 +21,7 @@ audio is not uploaded.
 
 - **Stations to contact** puts the waterfall, world map, and queued station cards
   together in a responsive workspace.
+- **Map** fills the workspace with decoded station locations and exchange paths.
 - **Spectrum** shows the 100–4000 audio Hz waterfall, automatic or manual display
   leveling, and an optional input waveform. Decoded signals have colored outlines;
   hover or keyboard-focus them for the message, SNR, frequency, and UTC times.
@@ -60,18 +61,19 @@ Adding a station does not start transmitting.
 or transmit audio was used for these screenshots.*
 
 1. In **Contact configuration**, enter your standard base callsign and grid,
-   choose **Transmit audio output**, and set the saved 0–60 dB attenuation.
+   choose **Transmit audio output**.
 2. In **Radio control**, explicitly connect and configure your IC-718 if using
    radio PTT. CI-V controls dial frequency, mode, and raw RF power; RTS/DTR keying
    supports shared or separate ports. CAT PTT is available for supported newer
    IC-718 revisions. See [radio setup and limits](docs/rig.md).
-3. Return to **Stations to contact** and click **Start contacting**. This prepares
+3. Return to **Stations to contact**, set the saved 0–60 dB **TX audio attenuation**,
+   and click **Start contacting**. This prepares
    the selected audio output and arms CQ-triggered calls, one exchange at a time.
    A fresh CQ starts a call in the immediately following UTC slot. Addressed
    replies advance the exchange automatically through reports and sign-off.
-4. Use **Stop contacting** to pause. Leaving Stations, hiding the browser tab,
-   stopping input, or an interruption also disarms contacting and releases PTT.
-   Returning requires another explicit Start contacting.
+4. Use **Stop contacting** to pause. Switching application pages keeps contacting and receiving active. Hiding the
+   browser tab, stopping input, or an interruption disarms contacting and releases
+   PTT; resuming then requires another explicit Start contacting.
 
 Queued cards show received exchange stages, CQ age, decode delay/deadline, contact
 tries, and local transmit status. Amber indicates playing audio; completed audio

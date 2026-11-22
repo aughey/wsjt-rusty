@@ -252,6 +252,69 @@ impl RadioControl {
             })
         })
     }
+    pub fn contact_frequency_ready(self) -> bool {
+        !self.reserved.get_untracked()
+            && self.access.with_value(|a| {
+                a.as_ref().is_some_and(|a| {
+                    a.alive.get()
+                        && a.ui.active.get_untracked()
+                        && !a.ui.tx.get_untracked()
+                        && !a.ui.busy.get_untracked()
+                        && !a.ui.polling.get_untracked()
+                })
+            })
+    }
+
+    /// Query after an exchange, while no timed transmission owns the port.
+    pub async fn read_contact_frequency(self) -> Option<(u64, f64)> {
+        let access = self.access.with_value(|a| a.clone())?;
+        if self.reserved.get_untracked()
+            || access.ui.tx.get_untracked()
+            || access.ui.busy.get_untracked()
+            || !access.alive.get()
+        {
+            return None;
+        }
+        let port = access.ports.borrow().cat.clone()?;
+        if !is_open(&port.handle) {
+            return None;
+        }
+        access.ui.busy.set(true);
+        let result = port.execute(Command::ReadFrequency).await;
+        if !access.alive.get()
+            || !access
+                .ports
+                .borrow()
+                .cat
+                .as_ref()
+                .is_some_and(|p| Rc::ptr_eq(p, &port))
+        {
+            return None;
+        }
+        access.ui.busy.set(false);
+        match result {
+            Ok(Reply::Frequency(hz)) => {
+                let sample = (hz, js_sys::Date::now());
+                access.ui.frequency.set(Some(sample));
+                access
+                    .ui
+                    .dial
+                    .set(format!("{:.6} MHz", hz as f64 / 1_000_000.0));
+                Some(sample)
+            }
+            Err(error) => {
+                access.ports.borrow_mut().close();
+                access.ui.active.set(false);
+                access.ui.frequency.set(None);
+                access.ui.dial.set("Unknown".into());
+                access.ui.status.set(format!(
+                    "Contact frequency query failed: {error}. Reconnect radio."
+                ));
+                None
+            }
+            _ => None,
+        }
+    }
     pub fn new() -> Self {
         Self {
             access: StoredValue::new_local(None),

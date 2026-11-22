@@ -23,6 +23,7 @@ use wsjt_rusty::decoder::{Mode, Settings};
 enum Tab {
     Stations,
     Spectrum,
+    Map,
     Radio,
     Configuration,
     Log,
@@ -31,9 +32,10 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Stations,
         Self::Spectrum,
+        Self::Map,
         Self::Radio,
         Self::Configuration,
         Self::Log,
@@ -44,6 +46,7 @@ impl Tab {
         match self {
             Self::Stations => "Stations to contact",
             Self::Spectrum => "Spectrum",
+            Self::Map => "Map",
             Self::Radio => "Radio control",
             Self::Configuration => "Contact configuration",
             Self::Log => "Log",
@@ -129,7 +132,6 @@ fn draw(canvas: &HtmlCanvasElement, ctx: &CanvasRenderingContext2d, samples: &[f
 
 #[derive(Clone, Copy)]
 struct DisplaySignals {
-    visible: Signal<bool>,
     floor: ReadSignal<f32>,
     automatic: ReadSignal<bool>,
     clock: WriteSignal<Option<(f64, f64)>>,
@@ -151,9 +153,6 @@ fn animate(
         let Some(monitor) = weak.upgrade() else {
             return;
         };
-        if !display.visible.get_untracked() {
-            return;
-        }
         {
             let mut state = monitor.borrow_mut();
             let Monitor {
@@ -299,7 +298,6 @@ pub fn App() -> impl IntoView {
     let contact_queue = RwSignal::new(queue_state);
     let playing = RwSignal::new(false);
     let display = DisplaySignals {
-        visible: spectrum_visible,
         floor: floor_db,
         playing,
         queue: contact_queue,
@@ -415,7 +413,7 @@ pub fn App() -> impl IntoView {
                 }),
             )
         });
-        if stations_visible.get_untracked() && auto_add_cq.get_untracked() {
+        if auto_add_cq.get_untracked() {
             add_cqs(Some(&fresh));
         }
         contact_queue.update(|q| {
@@ -483,12 +481,10 @@ pub fn App() -> impl IntoView {
     });
     let display_monitor = StoredValue::new_local(monitor.clone());
     Effect::new(move |_| {
-        let visible = spectrum_visible.get();
         let active = running.get();
         display_monitor.with_value(|monitor| {
             monitor.borrow_mut().frame = None;
-            if visible
-                && active
+            if active
                 && let Some(canvas) = canvas.get()
                 && let Ok(Some(ctx)) = canvas.get_context("2d")
                 && let Ok(ctx) = ctx.dyn_into::<CanvasRenderingContext2d>()
@@ -496,7 +492,9 @@ pub fn App() -> impl IntoView {
                 animate(monitor, canvas, ctx, display);
             }
         });
-        if !visible {
+    });
+    Effect::new(move |_| {
+        if !spectrum_visible.get() {
             set_hovered.set(None);
         }
     });
@@ -710,9 +708,7 @@ pub fn App() -> impl IntoView {
                     state.capture = Some(Rc::new(capture));
                     drop(state);
                     set_running.set(true);
-                    if display.visible.get_untracked() {
-                        animate(&monitor, canvas.clone(), ctx, display);
-                    }
+                    animate(&monitor, canvas.clone(), ctx, display);
                 }
                 Err(error) => set_status.set(audio::error_message(error)),
             }
@@ -741,20 +737,7 @@ pub fn App() -> impl IntoView {
 
     view! {
         <main>
-            <header>
-                <span class="brand">"wsjt-rusty"</span>
-                <span class="badge">"FT8 · Live receiver"</span>
-            </header>
-            <div class="session-bar" aria-label="Receive session">
-                <div class="controls">
-                    <button on:click=start disabled=move || running.get() || starting.get() || finishing.get()>
-                        {move || if starting.get() { "Starting…" } else { "Start listening" }}
-                    </button>
-                    <button class="secondary" on:click=stop disabled=move || !running.get() && !starting.get()>"Stop"</button>
-                </div>
-                <p class="status" role="status">{move || status.get()}</p>
-                <p class="clock">"UTC " {move || clock.get()}</p>
-            </div>
+            <div class="app-bar">
             <nav class="app-tabs" role="tablist" aria-label="Application views">
                 {Tab::ALL.into_iter().map(|item| view! {
                     <button id=item.id() role="tab" aria-controls="active-panel"
@@ -763,9 +746,20 @@ pub fn App() -> impl IntoView {
                         on:keydown=tab_keys on:click=move |_| tab.set(item)>{item.label()}</button>
                 }).collect_view()}
             </nav>
+            <div class="session-bar" aria-label="Receive session">
+                <div class="controls">
+                    <button on:click=start disabled=move || running.get() || starting.get() || finishing.get()>
+                        {move || if starting.get() { "Starting…" } else { "Start listening" }}
+                    </button>
+                    <button class="secondary" on:click=stop disabled=move || !running.get() && !starting.get()>"Stop"</button>
+                </div>
+                <p class="status" role="status" title=move || status.get()>{move || status.get()}</p>
+                <p class="clock">"UTC " {move || clock.get()}</p>
+            </div>
+            </div>
             <div id="active-panel" class="app-panel" role="tabpanel" tabindex="0" aria-labelledby=move || tab.get().id()>
             <crate::radio::RadioPanel control=radio_control visible=Signal::derive(move || tab.get() == Tab::Radio) />
-            <div class="station-workspace" class:contact-layout=move || stations_visible.get()>
+            <div class="station-workspace" class:contact-layout=move || stations_visible.get() class:map-layout=move || tab.get() == Tab::Map>
             <section class="monitor spectrum-panel" aria-label="Audio input monitor" hidden=move || !spectrum_visible.get()>
                 <div class="decode-activity" class:decoding=move || decoding.get()>
                     <span class="decode-spinner" aria-hidden="true"></span>
@@ -896,7 +890,7 @@ pub fn App() -> impl IntoView {
                     <div><dt>{move || if running.get() { "Audio through (UTC)" } else { "Capture end (UTC)" }}</dt><dd>{move || capture_end.get()}</dd></div>
                 </dl>
             </section>
-            <Show when=move || stations_visible.get()>
+            <Show when=move || matches!(tab.get(), Tab::Stations | Tab::Map)>
             <crate::contact_map::ContactMap conversations=conversations queue=contact_queue grid=my_grid mine=my_call />
             </Show>
             <crate::transmit_ui::StationsToContact visible=stations_visible configuration=configuration_visible queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running open_frequency=open_frequency playing=playing />
@@ -1018,11 +1012,6 @@ pub fn App() -> impl IntoView {
             </section>
             </Show>
             </div>
-            <footer><details><summary>"Receiver information"</summary>
-                <p>"Receive audio stays in this browser. Transmit audio follows the station queue while Start contacting is enabled. Uses the default audio input; localhost or HTTPS required."</p>
-                <p>"UTC estimates use your computer’s clock and captured sample counts. Input latency is not calibrated. Transmission end = start + 12.64 s."</p>
-                <p>"FT8: 100–4000 audio Hz, two passes. Keep the tab active. Stop releases input and flushes remaining audio."</p>
-            </details></footer>
         </main>
     }
 }

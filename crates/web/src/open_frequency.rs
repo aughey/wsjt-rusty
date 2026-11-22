@@ -3,8 +3,10 @@ use std::collections::VecDeque;
 
 const HISTORY_MS: f64 = 60_000.0;
 const MAX_ROWS: usize = 600;
+/// Lower edge of the automatic transmit search, independent of RX display bounds.
+pub const SEARCH_LOW_HZ: f32 = 250.0;
 /// Upper edge of the automatic transmit search, independent of RX display bounds.
-pub const SEARCH_HIGH_HZ: f32 = 3000.0;
+pub const SEARCH_HIGH_HZ: f32 = 2500.0;
 
 pub struct Occupancy {
     low: f32,
@@ -83,13 +85,14 @@ impl Occupancy {
         }
         let hz = (self.high - self.low) / self.totals.len() as f32;
         let width = (70.0 / hz).ceil() as usize;
-        // Keep the footprint and both guards below the TX search limit while
+        // Keep the footprint and both guards within the TX search limits while
         // retaining the original waterfall bin-to-frequency mapping.
         let available = (((self.high.min(SEARCH_HIGH_HZ) - self.low) / hz)
             .max(0.0)
             .floor() as usize)
             .min(self.totals.len());
-        if width > available {
+        let first = ((SEARCH_LOW_HZ - self.low) / hz).max(0.0).ceil() as usize;
+        if width > available || first > available - width {
             return None;
         }
         let mut sum: f32 = self.totals[..width].iter().sum();
@@ -97,6 +100,9 @@ impl Occupancy {
         for start in 0..=available - width {
             if start > 0 {
                 sum += self.totals[start + width - 1] - self.totals[start - 1];
+            }
+            if start < first {
+                continue;
             }
             let tone = self.low + start as f32 * hz + 10.0;
             let score = sum.max(0.0) / self.rows.len() as f32;

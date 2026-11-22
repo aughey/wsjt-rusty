@@ -169,16 +169,13 @@ button.decode-box:hover, button.decode-box:focus-visible { background: rgb(255 2
 .radio-controls input.short { width: 5rem; }
 .radio-dial { font: 600 clamp(1rem, 3vw, 1.4rem) ui-monospace, monospace; color: #68dec8; }
 button.transmit { background: #ffc2d8; border-color: #ffc2d8; color: #42172b; }
-.transmit-steps { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none; }
-.transmit-steps li { padding: .4rem .6rem; border: 1px solid #52667a; border-radius: 5px; }
-.transmit-steps li.current { color: #07131b; background: #68dec8; border-color: #68dec8; font-weight: 700; }
 .transmit-phase { color: #ffce72; font-weight: 700; }
 .transmit-output { display: flex; flex-direction: column; gap: .4rem; margin: 1rem 0 .75rem; }
 .transmit-output select { width: 100%; min-width: 0; box-sizing: border-box; padding: .65rem; font-size: 1rem; color: #e4edf5; background: #08131e; border: 1px solid #52667a; border-radius: 5px; }
 .stations-panel { border: 1px solid #365263; border-radius: .75rem; padding: 1.5rem; background: #101c29; }
 .queue-settings { max-width: 70rem; margin: 1rem 0; }
 .queue-settings > summary { cursor: pointer; margin-bottom: 1rem; }
-.station-queue { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
+.station-queue { display: grid; grid-template-columns: repeat(auto-fill, min(100%, 20rem)); justify-content: start; gap: 1rem; }
 .queued-station { min-width: 0; border: 1px solid var(--station-color, #52667a); border-radius: .6rem; padding: 1rem; background: #08131e; overflow-wrap: anywhere; }
 .queued-station.active { outline: 2px solid #68dec8; outline-offset: 2px; }
 .queued-station h3 { margin: 0; font-size: 1.15rem; }
@@ -205,19 +202,17 @@ button.transmit { background: #ffc2d8; border-color: #ffc2d8; color: #42172b; }
 /* Local transmit state stays separate from received exchange evidence. */
 .queued-station.has-transmitted { box-shadow: 0 0 12px rgb(104 222 200 / 22%); }
 .station-tx-status { color: #ffce72; font-weight: 700; font-family: ui-monospace, monospace; }
-.transmit-steps li { display: grid; gap: .35rem; min-width: 0; flex: 1 1 8rem; }
-.transmit-steps li.current { color: #e4edf5; background: #162d37; border-style: dashed; }
-.transmit-steps li.sent { color: #c4fff0; border: 1px solid #68dec8; background: #12312f; box-shadow: inset 0 0 9px rgb(104 222 200 / 12%), 0 0 8px rgb(104 222 200 / 25%); }
+.queued-station .exchange-slot.sent { color: #c4fff0; border: 1px solid #68dec8; background: #12312f; box-shadow: inset 0 0 9px rgb(104 222 200 / 12%), 0 0 8px rgb(104 222 200 / 25%); }
 .tx-step-status { font-size: .75rem; }
 .tx-step-message { font: .75rem/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
 .tx-state-legend { color: #aabccc; font-size: .75rem; }
-.queued-station.transmitting, .transmit-steps li.transmitting { border: 1px solid #ffd078; color: #fff0ce; background: #322719; outline-color: #ffd078; animation: tx-glow 1.6s ease-in-out infinite; }
+.queued-station.transmitting, .queued-station .exchange-slot.transmitting { border: 1px solid #ffd078; color: #fff0ce; background: #322719; outline-color: #ffd078; animation: tx-glow 1.6s ease-in-out infinite; }
 @keyframes tx-glow {
   0%, 100% { box-shadow: inset 0 0 8px rgb(255 190 75 / 10%), 0 0 7px rgb(255 190 75 / 30%); }
   50% { box-shadow: inset 0 0 18px rgb(255 190 75 / 20%), 0 0 22px rgb(255 190 75 / 65%); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .queued-station.transmitting, .transmit-steps li.transmitting { animation: none; box-shadow: 0 0 14px rgb(255 190 75 / 55%); }
+  .queued-station.transmitting, .queued-station .exchange-slot.transmitting { animation: none; box-shadow: 0 0 14px rgb(255 190 75 / 55%); }
 }
 
 .card-sort { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin: .75rem 0; font-size: .8rem; color: #aabccc; }
@@ -253,13 +248,13 @@ button.decode-box.pursued { border-width: 4px; background: color-mix(in srgb, va
 /* Full-page shell. Hidden panels must not be revived by flex/grid display rules. */
 [hidden] { display: none !important; }
 main { height: 100dvh; overflow: hidden; padding: 1rem 1.25rem; display: flex; flex-direction: column; }
-main > header, .session-bar, .app-tabs, main > footer { flex-shrink: 0; }
-header { margin-bottom: .75rem; }
-.session-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1.25rem; padding-block: .5rem; }
-.session-bar .status { margin: 0; flex: 1 1 20rem; }
-.session-bar .clock { margin: 0; }
-.session-bar .controls { gap: .5rem; }
-.app-tabs { display: flex; gap: .25rem; overflow-x: auto; border-bottom: 1px solid #365263; padding: .5rem 0; margin-bottom: 1rem; }
+.app-bar { display: flex; align-items: center; flex-shrink: 0; gap: .75rem; border-bottom: 1px solid #365263; margin-bottom: .5rem; }
+.session-bar { display: flex; align-items: center; flex-shrink: 0; gap: .75rem; }
+.session-bar .status { margin: 0; width: clamp(8rem, 12vw, 16rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8rem; }
+.session-bar .clock { margin: 0; white-space: nowrap; font-size: .8rem; }
+.session-bar .controls { gap: .35rem; }
+.session-bar button { white-space: nowrap; padding: .5rem .65rem; font-size: .875rem; }
+.app-tabs { display: flex; flex: 1; min-width: 0; gap: .25rem; overflow-x: auto; padding: .25rem 0; }
 .app-tabs button { white-space: nowrap; background: transparent; color: #aabccc; border-color: transparent; padding: .65rem .9rem; }
 .app-tabs button[aria-selected="true"] { color: #8af1db; background: #183a40; border-color: #68dec8; }
 .app-panel { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: .15rem .25rem 1rem; scrollbar-gutter: stable; }
@@ -269,13 +264,19 @@ header { margin-bottom: .75rem; }
 .app-panel .monitor { max-width: none; width: 100%; }
 .station-workspace.contact-layout { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 1rem; }
 .contact-layout > .spectrum-panel { flex: 1 1 38rem; width: 0; min-width: min(100%, 24rem); padding: 1rem; }
-.contact-layout > .contact-map-panel { flex: 1 1 30rem; min-width: 0; }
+.contact-layout > .contact-map-panel { display: flex; align-self: stretch; flex: 1 1 30rem; min-width: 0; }
 .contact-layout > .stations-panel { flex: 1 1 100%; min-width: 0; }
+.station-workspace.map-layout { display: flex; height: 100%; min-height: 0; }
+.map-layout > .contact-map-panel { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.map-layout #contact-map { flex: 1; height: 100%; min-height: 0; }
 .contact-configuration { max-width: 64rem; padding: 1.5rem; border: 1px solid #365263; border-radius: .75rem; background: #101c29; }
 .contact-configuration h2 { margin-bottom: 1rem; }
 footer { margin-top: 1rem; }
 @media (max-width: 600px) {
   main { padding: .75rem; }
+  .app-bar { gap: .35rem; }
+  .session-bar { gap: .35rem; }
+  .session-bar .status { width: 5rem; }
   .session-bar .clock { display: none; }
   .app-tabs button { padding: .55rem .7rem; }
   .contact-layout > .spectrum-panel { min-width: 100%; }
@@ -286,10 +287,38 @@ footer { margin-top: 1rem; }
 .contact-layout .spectrum-detail, .contact-layout .progress,
 .contact-layout .timing, .contact-layout .waveform-panel { display: none; }
 .contact-layout #waterfall { height: clamp(13rem, 28vh, 23rem); }
-.contact-layout #contact-map { height: clamp(13rem, 28vh, 23rem); }
+.contact-layout #contact-map { flex: 1; height: auto; min-height: clamp(13rem, 28vh, 23rem); }
 .contact-layout .waterfall-settings { margin-top: .5rem; }
 .contact-layout .toolbar { margin-bottom: .6rem; }
 .contact-layout .stations-panel { padding: 1rem; }
 .contact-layout .stations-panel > p { margin-block: .4rem; }
 
 footer summary { cursor: pointer; }
+
+/* Local audio status shares the stage row without replacing received evidence. */
+.queued-station .exchange-transmit { display: grid; gap: .2rem; min-width: 0; flex: 1; }
+.queued-station .exchange-stage-text { flex: 1; }
+.exchange-transmit .tx-step-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Keep station controls compact and scroll cards within their panel. */
+.station-workspace.contact-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; }
+.station-workspace.contact-layout > .spectrum-panel { grid-column: 1; grid-row: 1; width: 100%; max-width: none; min-width: 0; margin: 0; justify-self: stretch; }
+.station-workspace.contact-layout > .contact-map-panel { grid-column: 2; grid-row: 1; width: 100%; min-width: 0; margin: 0; justify-self: stretch; }
+.contact-layout > .stations-panel { grid-column: 1 / -1; }
+.contact-layout > .stations-panel { display: flex; flex-direction: column; min-height: 0; height: auto; align-self: stretch; }
+.contact-layout .stations-panel > * { flex-shrink: 0; }
+.contact-layout .stations-panel .station-queue { flex: 1 1 auto; min-height: 0; overflow-y: auto; align-content: start; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.stations-panel .tx-level { margin: .25rem 0; font-size: .875rem; }
+.stations-panel .card-sort { margin: .25rem 0; gap: .5rem; }
+.stations-panel > p:empty { display: none; }
+.stations-panel .toolbar { gap: .5rem; margin-bottom: .25rem; }
+
+@media (max-width: 600px) {
+  .station-workspace.contact-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr); }
+  .contact-layout #waterfall { height: 16vh; }
+  .contact-layout #contact-map { min-height: 12vh; }
+}
+
+@media (max-width: 600px) {
+  .station-workspace.contact-layout > .contact-map-panel { grid-column: 1; grid-row: 2; }
+}

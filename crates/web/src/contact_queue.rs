@@ -45,7 +45,7 @@ impl Station {
         {
             "Fresh CQ heard · response opportunity"
         } else {
-            "Waiting for a fresh CQ · station may be in another contact"
+            "Waiting for a fresh CQ"
         }
     }
 }
@@ -368,6 +368,27 @@ impl StationQueue {
             {
                 self.log_pending.remove(&record.id);
             }
+        }
+    }
+    pub fn completed_record_ids(&self) -> std::collections::BTreeSet<String> {
+        self.recent_logs
+            .iter()
+            .filter(|r| r.outcome == "Completed")
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// Update an archived contact by stable ID, even after its initial save was acknowledged.
+    pub fn record_completed_frequency(&mut self, id: &str, sample: (u64, f64)) {
+        if let Some(record) = self
+            .recent_logs
+            .iter_mut()
+            .find(|r| r.id == id && r.outcome == "Completed")
+        {
+            record.dial_hz = Some(sample.0);
+            record.frequency_read_ms = Some(sample.1);
+            record.revision += 1;
+            self.log_pending.insert(record.id.clone(), record.clone());
         }
     }
     pub fn record_frequency(&mut self, plan_id: u64, sample: Option<(u64, f64)>) {
@@ -996,6 +1017,28 @@ mod tests {
                 .any(|e| e.message.ends_with("-09"))
         );
     }
+    #[test]
+    fn completed_frequency_updates_archived_and_acknowledged_contact() {
+        let mut q = queue();
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        let p = q.plan(14000.0, "W9XYZ", "EN37").unwrap();
+        q.record_frequency(p.id, Some((14_074_000, 13900.0)));
+        q.complete(p.id, true);
+        hear(&mut q, 30500.0, "W9XYZ K1ABC 73");
+        let saved = q.log_pending.values().cloned().collect::<Vec<_>>();
+        let id = saved[0].id.clone();
+        q.acknowledge_log(&saved);
+        q.record_completed_frequency("unrelated", (7_074_000, 45000.0));
+        assert!(q.log_pending.is_empty());
+        q.record_completed_frequency(&id, (21_074_000, 46000.0));
+        q.acknowledge_log(&saved);
+        let updated = &q.log_pending[&id];
+        assert_eq!(updated.dial_hz, Some(21_074_000));
+        assert_eq!(updated.frequency_read_ms, Some(46000.0));
+        assert!(updated.revision > saved[0].revision);
+        assert_eq!(q.recent_logs.last().unwrap().dial_hz, updated.dial_hz);
+    }
+
     #[test]
     fn received_closing_removes_station_and_cq_state_sorts_first() {
         let mut q = queue();

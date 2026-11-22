@@ -27,16 +27,17 @@ The full-page app has tabs for **Stations to contact**, **Spectrum**, **Radio
 control**, **Contact configuration**, **Log**, **Decoded messages**, and
 **Conversations**. Stations to contact combines the waterfall, world map and
 station cards in a responsive flex layout. Callsign, grid, audio output, PTT
-selection and attenuation live in Contact configuration. Start listening and
+selection lives in Contact configuration; TX audio attenuation is on Stations to contact. Start listening and
 Stop remain available above every tab. Arrow keys, Home and End navigate tabs.
 
-Only the visible view renders live content: hidden spectrum views stop their
-animation/FFT work, the map is disposed when leaving Stations, and radio
-readback polling pauses outside Radio control. Leaving Stations stops and
-disarms contacting, including pending audio/PTT; returning requires Start
-contacting again. Manual radio TX is released on leaving Radio control. Queue
-sorting, expiry checks and auto-add run only while Stations is visible; elapsed
-CQ time is checked again on return. Settings and selections survive tab changes.
+Receive decoding, conversation tracking, queue scheduling, sorting, expiry and
+CQ auto-add continue across application pages. The waterfall keeps its bounded
+history and open-frequency estimates live even when hidden, so returning does
+not create a display gap. Switching pages does not disarm contacting or cancel
+audio/PTT. Explicit Stop, browser-tab hiding and input interruption still do.
+The map is disposed when hidden, and radio readback polling pauses outside Radio
+control. Manual radio TX is released on leaving Radio control. Settings and
+selections survive page changes.
 The shared receive session, bounded decode/conversation history and durable
 contact-log writes continue while listening so changing views does not lose
 received evidence or unsaved contact records. Hidden tabs do not render cards,
@@ -221,7 +222,7 @@ attempts are not marked sent. Starting a new listening session clears these
 marks. Reduced-motion settings use a steady amber glow. These local playback
 indicators are separate from received evidence and do not confirm RF delivery.
 
-**TX audio attenuation** reduces output from 0 to 60 dB. Move the slider right
+On **Stations to contact**, **TX audio attenuation** reduces output from 0 to 60 dB. Move the slider right
 to lower drive. Set it in Contact configuration before starting contacting.
 For example, 20 dB attenuation gives 10% of the original audio amplitude.
 Callsign, grid, audio device, attenuation and radio settings remain saved per browser/site.
@@ -441,7 +442,7 @@ stale or ongoing exchanges. Auto-add applies only to newly decoded CQs, starts
 off on every page load and is never saved. Adding stations does not arm transmit.
 
 The saved **find an open frequency** checkbox in Contact configuration selects a
-transmit audio frequency within 100–3000 Hz for each new attempt from up to 60 seconds of available
+transmit audio frequency within 250–2500 Hz for each new attempt from up to 60 seconds of available
 waterfall spectra. It minimizes accumulated energy above each snapshot's median
 background across a 50 Hz footprint plus 10 Hz guards on each side. Missing
 snapshots do not count as quiet data; display floor/color settings have no effect.
