@@ -129,6 +129,7 @@ PCM16LE stdin -> CLI conversion to normalized mono f32 -------+
 | `crates/web/src/receiver.rs` | Browser session wrapper over `StreamingDownsampler` and the shared FT8 `AudioStream`; validates continuity and adds UTC timestamps without changing the common decoder envelope. |
 | `crates/web/src/spectrum.rs`, `crates/web/src/waterfall.rs` | RustFFT/Hann visualization, automatic background leveling, yellow-highlight color palette and bounded scrolling canvas. Display processing never modifies decoder PCM. |
 | `crates/web/src/annotations.rs` | Nominal FT8 time/frequency rectangles, clipped to the passband and captured history using FFT row-center timestamps. |
+| `crates/web/src/conversations.rs` | Receive-only conversation estimates, callsign-pair grouping, observed evidence, inferred participants and bounded audio-clock stale/sign-off retention. Independent of decoder DSP. |
 | `crates/web/src/message_kind.rs` | Presentation-only message classification, colors and icons. Classification is not QSO tracking or a replacement for protocol message unpacking. |
 | `crates/decoder/tests/decoder.rs` | FT8, error-correction, waveform and partial-frame regressions. |
 | `crates/audio/tests/read.rs` | WAV channel averaging and resampling/alias rejection regression. |
@@ -223,8 +224,30 @@ arbitrary recording offsets, with tests demonstrating that coverage.
   report, R-report, RRR, 73/RR73 and Other. Check the 77-bit payload type before
   classifying rendered text: current ordinary exchange labels cover `i3` 1, 2
   and 4. Free text, telemetry and specialized contest forms remain Other even
-  if their text contains CQ or 73. Do not infer an established QSO state from
-  a single received message. Keep category labels in accessible descriptions.
+  if their text contains CQ or 73. Message categories alone do not establish a
+  QSO. The separate `conversations.rs`
+  tracker estimates progress from ordinary exchanges and marks unheard participants
+  or late entry as inferred; never synthesize decoded evidence. It ages against
+  processed audio, marks stale after four silent slots, retains terminal entries
+  for three slots, freezes on Stop and clears on Start. Bound it to 200 contacts
+  and 64 evidence messages each, plus six bounded stage summaries; unresolved
+  hashes must not join contacts. Conversation cards show CQ, callback, report,
+  roger-report, acknowledgment and closing 73, separating received evidence from
+  unheard/expected stages. RR73 fills acknowledgment and makes closing 73 optional.
+  Retries share a stage, late decodes fill gaps, and summaries survive history trimming.
+  Station directions are estimates from the earliest available opening evidence.
+  Keep conversation grid cells stable through progress and neighboring expiry;
+  reuse vacancies without compacting survivors. Use small fixed-size tiles with
+  six vertical stage indicators with the latest decoded message in each received
+  stage, including callsigns and reports. Keep dates out of the tiles; truncate
+  long messages with the full text available on hover. Hover/focus/tap details
+  show received evidence and inferred context without shifting the grid; Escape
+  dismisses them. Tile colors reuse `MessageKind` colors for the furthest heard
+  stage; RR73/73 use sign-off pink and stale overrides progress with gray. Retain
+  stage text, hatching and ghosting so color is not the only signal.
+  Responsive columns change only with viewport width. At capacity
+  replace the least recently heard contact.
+  Keep category labels in accessible descriptions.
 - Automatic display leveling estimates the median passband background;
   manual floor control remains available. The dark navy/green/yellow/pale-yellow scale
   spans 50 dB and applies to new rows only. Display levels are FFT-bin dBFS,

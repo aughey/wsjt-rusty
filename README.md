@@ -147,6 +147,63 @@ labels derived from standard/nonstandard callsign payloads and message content,
 not inferred QSO state. Free text, telemetry and specialized contest forms stay
 Other even if their text contains CQ or 73.
 
+The **Conversations** panel groups ordinary FT8 exchanges by callsign pair,
+independent of which station is addressed or its audio frequency. CQ calls start
+an entry that can develop into a contact. Progress follows calling, locator
+exchange, reports, acknowledgment and sign-off, without moving backward on
+retries. These are receive-only estimates: an addressed station can be inferred
+without hearing it transmit, and entering after the opening is marked inferred.
+
+The conversation board spans the browser width, with a dense grid of small
+fixed-height tiles and two
+columns on phones and up to ten on wide displays. Each tile shows only its
+callsign pair, six vertical stage indicators and a small stale/ended label.
+Received stages show their latest decoded message, including callsigns, locator,
+report or acknowledgment. Long messages truncate with full text on hover.
+Dates and explanatory text stay out of the tiles. Hover, keyboard
+focus or tap reveals received messages, inferred participants and the expected
+next response; Escape dismisses the detail panel. Hatched unheard stages,
+ghosted upcoming stages and the highlighted current/next stage remain visible.
+Tile borders, tinted backgrounds and received stages follow conversation progress:
+green CQ, cyan reply, amber report, purple R-report, blue RRR, pink sign-off and
+gray stale. This reuses the waterfall message palette. RR73 uses the sign-off
+color even though it fills the acknowledgment stage. Retries do not regress the
+color; stale contacts regain their progress color when activity resumes.
+
+Activity never sorts contacts or changes tile size. Expiry leaves a vacant grid
+cell, and new contacts reuse vacancies without shifting survivors. Resizing the
+viewport adjusts the column count. At the 200-contact limit, the least recently
+heard contact is replaced. The board accommodates many contacts on a page;
+additional rows scroll with the page when its capacity exceeds the viewport.
+
+Each tile lays out six logical stages: **CQ**, **callback/locator**,
+**response/report**, **roger-report**, **RRR or RR73**, and **closing 73**.
+Received messages occupy their stage, with evidence available in the detail
+panel. Empty stages are marked **Not received**, **Expected next**, or
+**Upcoming** in their accessible descriptions; stale contacts show **Not heard**
+for unfinished stages. Unheard blocks have diagonal hatching; upcoming and
+optional blocks use ghosted outlines. The next expected response keeps an amber
+highlight, with a legend explaining these visual states. The furthest received
+stage is highlighted, and the detail panel names the expected next response and
+station direction. Earlier stages fill in when recovery decodes arrive. These
+are logical stages rather than fixed UTC slots: stations can repeat or skip
+steps. RR73 occupies acknowledgment and makes a subsequent 73 optional.
+
+The detail panel shows actual decoded transmissions; no missing message is
+invented. A sign-off heard on one side does not prove mutual completion.
+
+After four silent 15-second slots (60 seconds since the last transmission end),
+an unfinished contact becomes **Stale**. Stale entries remain for three more
+slots (45 seconds); sign-offs remain for three slots after the last transmission
+end. A fresh locator/report exchange after sign-off starts a new contact.
+Late recovery decodes are merged by transmission time. Aging follows processed
+audio, freezes on Stop, and resets on Start. The panel keeps at most 200 contacts
+and 64 recent evidence messages per contact, plus one latest-message summary
+for each of the six stages. Unresolved `<...>` callsigns,
+free text, telemetry and specialized contest forms are left in the raw stream
+without conversation grouping. This heuristic does not infer hidden callsigns,
+confirm a QSO, or separate simultaneous contacts between the same callsign pair.
+
 A yellow **Decoding FT8…** indicator and spinner appear while the worker is
 actually running a decode attempt, including early attempts, recovery windows
 and the final Stop flush. It retains the latest attempt's start time and shows
@@ -196,6 +253,14 @@ cargo check -p wsjt-web --target wasm32-unknown-unknown
 cargo clippy -p wsjt-web --target wasm32-unknown-unknown -- -D warnings
 node --test crates/web/tests/capture-worklet.cjs
 ```
+
+The optional `crates/web/tests/conversations-browser.cjs` Playwright check runs
+an independent FT8 recording through simulated microphone capture, then checks
+conversation grouping, inference, expiry, evidence controls, Stop/restart and
+mobile layout with controlled worker events. Serve an isolated release build
+and run it with a Playwright installation on `NODE_PATH` and the server URL as
+its argument. Conversation unit tests also cover delayed decodes, retries,
+multiple partners, unresolved callsigns and bounded histories.
 
 Tests cover streaming resampling equivalence at 12/44.1/48 kHz, bounded filter
 history, UTC conversion, rejected discontinuities, FT8 fixture payload/message

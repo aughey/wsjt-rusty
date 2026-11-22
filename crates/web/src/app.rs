@@ -12,6 +12,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
+use crate::conversations::Conversations;
 use crate::message_kind::{self, MessageKind};
 use crate::waterfall::{self, Waterfall};
 use audio::Capture;
@@ -169,6 +170,20 @@ fn utc(ms: f64) -> String {
         .unwrap_or_default()
 }
 
+// Explicit integer grid coordinates avoid packing gaps left by expired contacts.
+fn tile_position(slot: usize) -> String {
+    [2, 3, 4, 6, 8, 10]
+        .into_iter()
+        .map(|columns| {
+            format!(
+                "--row-{columns}:{};--col-{columns}:{};",
+                slot / columns + 1,
+                slot % columns + 1
+            )
+        })
+        .collect()
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let canvas = NodeRef::<Canvas>::new();
@@ -209,6 +224,19 @@ pub fn App() -> impl IntoView {
     let (capture_end, set_capture_end) = signal("—".to_owned());
     let (progress, set_progress) = signal("No audio captured".to_owned());
     let (rows, set_rows) = signal(Vec::<Row>::new());
+    let (conversations, set_conversations) = signal(Conversations::default());
+    let (hovered_contact, set_hovered_contact) = signal(None::<u64>);
+    let (focused_contact, set_focused_contact) = signal(None::<u64>);
+    let selected_contact = Signal::derive(move || {
+        let id = hovered_contact.get().or(focused_contact.get());
+        conversations.with(|tracker| {
+            tracker
+                .items
+                .iter()
+                .find(|contact| Some(contact.id) == id)
+                .cloned()
+        })
+    });
     // Owner disposal drops the interval and cancels the clock updates.
     let _clock_timer = StoredValue::new_local(Interval::new(1000, move || {
         set_clock.set(utc(js_sys::Date::now()));
@@ -272,6 +300,9 @@ pub fn App() -> impl IntoView {
         set_decode_activity.set("Waiting for an FT8 decode attempt".into());
         set_decode_started.set(String::new());
         set_rows.set(Vec::new());
+        set_conversations.set(Conversations::default());
+        set_hovered_contact.set(None);
+        set_focused_contact.set(None);
         set_hovered.set(None);
         set_waterfall_clock.set(None);
         set_capture_start.set("—".into());
@@ -308,6 +339,19 @@ pub fn App() -> impl IntoView {
                         "{:.1} s processed · {:.1} s behind live · next slot attempt in {:.1} s",
                         update.received_seconds, lag, next_attempt
                     )
+                });
+                set_conversations.update(|tracker| {
+                    tracker.update(
+                        update.capture_end_ms,
+                        update.decodes.iter().map(|row| {
+                            (
+                                row.start_utc_ms,
+                                row.end_utc_ms,
+                                row.message.as_str(),
+                                row.payload.as_str(),
+                            )
+                        }),
+                    );
                 });
                 set_rows.update(|rows| {
                     rows.extend(update.decodes);
@@ -543,6 +587,83 @@ pub fn App() -> impl IntoView {
                     <div><dt>"Capture start (UTC)"</dt><dd>{move || capture_start.get()}</dd></div>
                     <div><dt>{move || if running.get() { "Audio through (UTC)" } else { "Capture end (UTC)" }}</dt><dd>{move || capture_end.get()}</dd></div>
                 </dl>
+            </section>
+            <section class="results conversation-board" aria-label="FT8 conversations">
+                <div class="toolbar"><h2>"Conversations"</h2><span class="rate">{move || format!("{} tracked", conversations.with(|t| t.items.len()))}</span></div>
+                <div class="exchange-state-legend" aria-label="Conversation colors and exchange stage appearance">
+                    {[(MessageKind::Cq, "CQ"), (MessageKind::Reply, "Reply"), (MessageKind::Report, "Report"),
+                        (MessageKind::RogerReport, "R-report"), (MessageKind::Acknowledgment, "RRR"),
+                        (MessageKind::Signoff, "Ended"), (MessageKind::Other, "Stale")].into_iter().map(|(kind, label)| view! {
+                            <span class="conversation-color-key" style=format!("--conversation-color:{}", kind.color())>{label}</span>
+                        }).collect_view()}
+
+                    <span class="missing-key">"Not received"</span>
+                    <span class="upcoming-key">"Ahead / optional"</span>
+                    <span class="expected-key">"Next"</span>
+                </div>
+                <p class="empty" hidden=move || !conversations.get().items.is_empty()>"Waiting for FT8 conversations."</p>
+                <div class="conversation-list">
+                    <For each=move || conversations.with(|t| t.items.clone()) key=|contact| contact.id children=move |initial| {
+                        let id = initial.id;
+                        let contact = Signal::derive(move || conversations.with(|t|
+                            t.items.iter().find(|c| c.id == id).cloned()).unwrap_or_else(|| initial.clone()));
+                        let status = Signal::derive(move || contact.get().status(conversations.with(|t| t.now_ms)));
+                        view! {
+                            <article class="conversation" tabindex="0" data-conversation-id=id
+                                style=move || contact.with(|c| format!("{}--conversation-color:{};", tile_position(c.display_slot), c.color(conversations.with(|t| t.now_ms))))
+                                class:inactive=move || matches!(status.get(), "Stale" | "Sign-off heard")
+                                aria-label=move || format!("{} · {}. {}", contact.get().label(), status.get(), contact.get().expectation(conversations.with(|t| t.now_ms)))
+                                aria-describedby="conversation-tooltip"
+                                on:mouseenter=move |_| set_hovered_contact.set(Some(id))
+                                on:mouseleave=move |_| set_hovered_contact.set(None)
+                                on:focus=move |_| set_focused_contact.set(Some(id))
+                                on:blur=move |_| set_focused_contact.set(None)
+                                on:click=move |_| set_focused_contact.set(Some(id))
+                                on:keydown=move |event| { if event.key() == "Escape" { set_hovered_contact.set(None); set_focused_contact.set(None); } }>
+                                <h3>{move || contact.get().label()}</h3>
+                                <ol class="exchange-slots" aria-label="Exchange stages">
+                                    {move || contact.get().exchange_slots(conversations.with(|t| t.now_ms)).into_iter().map(|slot| {
+                                        let description = format!("{} · {}{}", slot.step.label(), slot.state.label(),
+                                            slot.evidence.as_ref().map(|e| format!(" · {} · {} received", e.latest.message, e.count)).unwrap_or_default());
+                                        let mark = match slot.state {
+                                            crate::conversations::SlotState::Received => "✓",
+                                            crate::conversations::SlotState::Missing | crate::conversations::SlotState::NotHeard => "▧",
+                                            crate::conversations::SlotState::Expected => "›",
+                                            crate::conversations::SlotState::Upcoming | crate::conversations::SlotState::Optional => "·",
+                                        };
+                                        view! {
+                                            <li class=format!("exchange-slot {}", slot.state.class()) class:current=slot.current
+                                                aria-current=slot.current.then_some("step") aria-label=description>
+                                                <span class="exchange-stage-text">
+                                                    <span class="exchange-label">{slot.step.short_label()}</span>
+                                                    {slot.evidence.map(|evidence| view! {
+                                                        <span class="exchange-message" title=evidence.latest.message.clone()>{evidence.latest.message.clone()}</span>
+                                                    })}
+                                                </span>
+                                                <span class="exchange-mark" aria-hidden="true">{mark}</span>
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ol>
+                                <span class="conversation-state">{move || match status.get() { "Stale" => "Stale", "Sign-off heard" => "Ended", _ => "" }}</span>
+                            </article>
+                        }
+                    } />
+                </div>
+                <Show when=move || selected_contact.get().is_some()>
+                    <div id="conversation-tooltip" class="conversation-tooltip" role="tooltip">
+                        {move || selected_contact.get().map(|contact| view! {
+                            <strong>{contact.label()}</strong>
+                            <span>{contact.status(conversations.with(|t| t.now_ms))}</span>
+                            <p class="exchange-expectation">{contact.expectation(conversations.with(|t| t.now_ms))}</p>
+                            <p class="inference" hidden=!contact.inferred>{contact.inference_note()}</p>
+                            <span class="tooltip-evidence-label">"Recent received messages"</span>
+                            <ul class="conversation-evidence">{contact.messages.iter().rev().take(6).rev().map(|heard| view! {
+                                <li class="message">{heard.message.clone()}</li>
+                            }).collect_view()}</ul>
+                        })}
+                    </div>
+                </Show>
             </section>
             <section class="results" aria-label="FT8 decodes">
                 <div class="toolbar"><h2>"Decoded messages"</h2><span class="rate">{move || format!("{} shown · latest 500", rows.get().len())}</span></div>
