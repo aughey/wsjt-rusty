@@ -797,6 +797,13 @@ pub fn App() -> impl IntoView {
                             role="img" aria-label=format!("Live FFT waterfall across {low_hz:.0} to {high_hz:.0} audio hertz. Newest audio at top; 60 seconds of history. Brighter colors indicate stronger signals.")>
                             "Live frequency waterfall. Your browser must support canvas."
                         </canvas>
+                        <div class="timing-guides" aria-hidden="true">
+                            {move || crate::annotations::timing_guides(waterfall_clock.get()).into_iter().map(|(top, start)| view! {
+                                <div class="timing-guide" class:end-guide={!start} style=format!("top:{top}%")>
+                                    <span>{if start { "Start +0.50 s" } else { "End +13.14 s" }}</span>
+                                </div>
+                            }).collect_view()}
+                        </div>
                         {move || contact_queue.with(|q| q.active.as_ref().map(|a| (a.contact.target.clone(), a.transmit_frequency_hz.or_else(|| q.items.iter().find(|s| s.call == a.contact.target).map(|s| s.frequency_hz))))).and_then(|(call, hz)| hz.map(|hz| view! {
                             <div class="tx-frequency-marker" class:label-right={hz > (low_hz + high_hz) / 2.0} role="img" aria-label=format!("Transmit to {call} at {hz:.1} audio Hz; 50 Hz bandwidth")
                                 style=format!("left:{}%;width:{}%", (hz-low_hz)/(high_hz-low_hz)*100.0, 50.0/(high_hz-low_hz)*100.0)>
@@ -843,6 +850,7 @@ pub fn App() -> impl IntoView {
                                     <strong>{row.message}</strong>
                                     <span>{format!("SNR {:+.1} dB · {:.1} audio Hz", row.snr_db, row.frequency_hz)}</span>
                                     <span>{format!("{} – {}", utc(row.start_utc_ms), utc(row.end_utc_ms))}</span>
+                                    <span>{format!("Start offset {:+.2} s from UTC slot +0.50 s (includes clock and audio latency)", crate::annotations::start_offset_seconds(row.start_utc_ms))}</span>
                                 })}
                             </div>
                         </Show>
@@ -860,6 +868,7 @@ pub fn App() -> impl IntoView {
                     }).collect_view()}
                 </div>
                 <p class="spectrum-detail">"Thick outline: station queued · Filled, bright outline: actively contacting · Dashed cyan band: TX frequency"</p>
+                <p class="spectrum-detail">"Horizontal timing guides: solid = expected FT8 start (UTC slot +0.50 s); dashed = end (+13.14 s). Compare signal edges with these lines; hover/focus a decode for its start offset. PTT leads audio by 0.50 s. Device latency and propagation are uncalibrated."</p>
                 <div class="waterfall-settings">
                     <label class="auto-level"><input type="checkbox" prop:checked=move || automatic.get()
                         on:change=move |event| set_automatic.set(event_target_checked(&event)) />"Auto level"</label>

@@ -3,6 +3,36 @@ pub const HISTORY_MS: f64 = 60_000.0;
 // Eight FT8 tones spaced 6.25 Hz, with half a tone of padding at either edge.
 pub const TONE_SPACING_HZ: f64 = 6.25;
 
+/// Nominal FT8 audio boundaries, in the same FFT-center coordinates as boxes.
+/// These are UTC references, not measurements of propagation/device latency.
+pub fn timing_guides(clock: Option<(f64, f64)>) -> Vec<(f64, bool)> {
+    let Some((first, latest)) = clock else {
+        return Vec::new();
+    };
+    if !first.is_finite() || !latest.is_finite() || first > latest {
+        return Vec::new();
+    }
+    let oldest = first.max(latest - HISTORY_MS);
+    let mut guides = Vec::new();
+    let first_slot = ((oldest - 13_140.0) / 15_000.0).ceil() as i64;
+    let last_slot = ((latest - 500.0) / 15_000.0).floor() as i64;
+    for slot in first_slot..=last_slot {
+        for (offset, start) in [(500.0, true), (13_140.0, false)] {
+            let time = slot as f64 * 15_000.0 + offset;
+            if time >= oldest && time <= latest {
+                guides.push(((latest - time) / HISTORY_MS * 100.0, start));
+            }
+        }
+    }
+    guides
+}
+
+/// Observed start minus the nearest nominal slot +0.5 s (includes clock and I/O).
+pub fn start_offset_seconds(start_ms: f64) -> f64 {
+    let slot = ((start_ms - 500.0) / 15_000.0).round();
+    (start_ms - (slot * 15_000.0 + 500.0)) / 1000.0
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Bounds {
     pub left: f64,
@@ -58,6 +88,25 @@ pub fn bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_references_clip_scroll_and_keep_the_nominal_half_second() {
+        assert!(timing_guides(None).is_empty());
+        assert!(timing_guides(Some((f64::NAN, 1000.0))).is_empty());
+        assert!(timing_guides(Some((0.0, 499.0))).is_empty());
+        assert_eq!(timing_guides(Some((0.0, 500.0))), vec![(0.0, true)]);
+        let guides = timing_guides(Some((0.0, 15_500.0)));
+        assert_eq!(guides.len(), 3);
+        assert_eq!(guides[0], (25.0, true));
+        assert_eq!(guides[1], ((15_500.0 - 13_140.0) / 600.0, false));
+        assert_eq!(guides[2], (0.0, true));
+        let scrolled = timing_guides(Some((0.0, 75_500.0)));
+        assert_eq!(scrolled.len(), 9);
+        assert!(scrolled.iter().all(|(top, _)| (0.0..=100.0).contains(top)));
+        assert_eq!(start_offset_seconds(15_500.0), 0.0);
+        assert_eq!(start_offset_seconds(15_800.0), 0.3);
+        assert_eq!(start_offset_seconds(15_200.0), -0.3);
+    }
 
     #[test]
     fn late_decodes_align_to_signal_time_and_move_with_audio_history() {

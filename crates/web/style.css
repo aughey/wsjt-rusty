@@ -66,10 +66,17 @@ th { color: #aabccc; font-weight: 500; }
 .waterfall-plot { position: relative; grid-column: 1; grid-row: 2; min-width: 0; overflow: hidden; border: 1px solid #293a4c; border-radius: .2rem; }
 .waterfall-plot #waterfall { border: none; border-radius: 0; }
 .decode-overlays { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.timing-guides { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.timing-guide { position: absolute; width: 100%; border-top: 1px solid rgb(213 229 243 / 55%); }
+.timing-guide.end-guide { border-top-style: dashed; border-top-color: rgb(213 229 243 / 35%); }
+.timing-guide span { position: absolute; right: .2rem; top: .1rem; padding: 0 .2rem; background: rgb(7 17 30 / 80%); color: #c6d7e5; font-size: .625rem; line-height: 1.2; }
 button.decode-box { position: absolute; padding: 0; min-width: 0; min-height: 0; border: 1px solid var(--decode-color, #e5f8ff); border-radius: 1px; background: rgb(5 16 30 / 6%); box-shadow: 0 0 0 1px rgb(0 0 0 / 65%); pointer-events: auto; cursor: help; }
 button.decode-box:hover, button.decode-box:focus-visible { background: rgb(255 255 255 / 15%); border-color: var(--decode-color, white); outline: 1px solid var(--decode-color, white); outline-offset: 1px; z-index: 2; }
 .decode-tooltip { position: absolute; top: .75rem; left: .75rem; z-index: 3; display: flex; flex-direction: column; gap: .3rem; padding: .75rem 1rem; max-width: calc(100% - 1.5rem); border: 1px solid #a4d7eb; border-radius: .35rem; background: rgb(7 17 30 / 96%); box-shadow: 0 .25rem 1rem rgb(0 0 0 / 40%); color: #e8f5fc; pointer-events: none; overflow-wrap: anywhere; font-size: .875rem; }
 .decode-tooltip strong { color: white; font-size: 1rem; }
+@media (max-width: 640px) {
+  .decode-tooltip { position: fixed; top: auto; bottom: 1rem; left: .75rem; right: .75rem; max-width: none; }
+}
 .auto-level { display: inline-flex; align-items: center; gap: .4rem; }
 .waterfall-settings .auto-level input { width: auto; }
 .waterfall-settings input:disabled { opacity: .45; }

@@ -77,6 +77,24 @@ The display is visualization-only, separate from continuous decoder PCM.
 Skipped animation intervals are left blank rather than fabricated, Stop freezes
 the display, and a new capture clears its history.
 
+Horizontal solid lines mark nominal FT8 audio starts at UTC slot +0.50 seconds;
+dashed lines mark ends at +13.14 seconds (12.64 seconds of audio). They share
+the decoded boxes' FFT-window-center clock, scroll with history, and freeze on
+Stop. Hover or focus a decode to see its observed start offset from the nearest
+nominal start: positive means later. That offset includes remote/local clock
+error, propagation and audio buffering; it is not a propagation measurement.
+These guides do not shift samples or transmit timing. Compare several stations
+before attributing a common offset to local equipment. FFT windowing also blurs
+visible signal edges.
+
+Transmit already schedules audio at slot +0.50 seconds, matching the standard
+FT8 delay in upstream `Modulator/Modulator.cpp`; the 500 ms PTT lead starts at
+the slot boundary, rather than adding another half-second to that audio start.
+Normal release is requested 200 ms after audio completion. Receive audio seen
+after returning to RX can include device-buffered samples or late stations;
+that alone does not establish an early local transmission. Physical audio
+latency and radio switching remain uncalibrated.
+
 Decoded FT8 signals get outlined boxes over their nominal 50 Hz bandwidth and
 12.64-second transmission duration. Hover a box or focus it with the keyboard
 to see the message, SNR, audio frequency and UTC times. Boxes follow the audio
