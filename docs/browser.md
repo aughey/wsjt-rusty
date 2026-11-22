@@ -382,7 +382,8 @@ Card movement animations are disabled.
 
 The Stations to contact tab displays a pan/zoom world map using bundled OpenLayers 10.10.0 and
 OpenStreetMap tiles. Great-circle lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or local attempts. Colors follow received stages; a white home marker uses
-My grid. Select a marker for callsign, grid, coordinates and distance. Unknown
+My grid. The map fills its panel without a header or close button; station and
+path text lists remain available to screen readers. Unknown
 grids are omitted. The visible map makes external tile requests to
 OpenStreetMap, with visible attribution and normal browser caching. No callsign
 lookup or spot upload is performed.

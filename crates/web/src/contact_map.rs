@@ -42,7 +42,6 @@ pub fn ContactMap(
     grid: RwSignal<String>,
     mine: RwSignal<String>,
 ) -> impl IntoView {
-    let shown = RwSignal::new(true);
     let markers = Memo::new(move |_| {
         // Per-station latest grid survives message trimming, bounded by retained cards.
         let mut points = std::collections::BTreeMap::new();
@@ -156,9 +155,6 @@ pub fn ContactMap(
             .collect::<Vec<_>>()
     });
     Effect::new(move |_| {
-        if !shown.get() {
-            return;
-        }
         update_map(
             &serde_json::to_string(&MapData {
                 markers: markers.get(),
@@ -170,17 +166,10 @@ pub fn ContactMap(
     on_cleanup(dispose_map);
     view! {
         <section class="results contact-map-panel" aria-label="Contact world map">
-            <div class="toolbar"><h2>"Contact world map"</h2>
-                <button class="secondary" aria-expanded=move || shown.get().to_string() on:click=move |_| {
-                    shown.update(|v| *v = !*v);
-                    if !shown.get_untracked() { dispose_map(); }
-                }>{move || if shown.get() { "Close map" } else { "Open map" }}</button>
-            </div>
-            <details class="map-explanation"><summary>"About map locations and paths"</summary><p>"Decoded grid centers, not exact station positions. Lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or a local attempt, not confirmed RF delivery. Colors follow received exchange stages. Set My grid for approximate distances. Unknown grids are omitted. Opening the map requests tiles from OpenStreetMap."</p></details>
-            <div hidden=move || !shown.get()>
-                <div id="contact-map" tabindex="0" aria-label="World map of decoded stations. Arrow keys pan; plus and minus zoom." />
+            <div id="contact-map" tabindex="0" aria-label="World map of decoded stations. Arrow keys pan; plus and minus zoom." />
+            <div class="map-accessibility">
                 <p id="contact-map-status" role="status" />
-                <p id="contact-map-detail" aria-live="polite">"Select a marker for its callsign, grid, coordinates and distance."</p>
+                <p id="contact-map-detail" aria-live="polite" />
                 <p>{move || format!("{} communication paths · unknown endpoints omitted", links.get().len())}</p>
                 <details><summary>"Communication paths (text list)"</summary><ul>{move || links.get().into_iter().map(|l| view! { <li>{format!("{} ↔ {} · {}", l.from, l.to, if l.inferred { "Inferred context / local attempt" } else { "Received exchange" })}</li> }).collect_view()}</ul></details>
                 <details><summary>"Located stations (text list)"</summary>

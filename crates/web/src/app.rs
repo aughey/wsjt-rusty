@@ -288,7 +288,6 @@ pub fn App() -> impl IntoView {
     let recovery_lag = RwSignal::new(None::<f64>);
     let (status, set_status) =
         signal("Ready. Start listening to allow microphone access.".to_owned());
-    let (rate, set_rate) = signal("—".to_owned());
     let (clock, set_clock) = signal(utc(js_sys::Date::now()));
     let (capture_start, set_capture_start) = signal("—".to_owned());
     let (capture_end, set_capture_end) = signal("—".to_owned());
@@ -703,7 +702,6 @@ pub fn App() -> impl IntoView {
                         "16,384-point Hann FFT · {:.2} Hz/bin",
                         capture.sample_rate() / crate::spectrum::FFT_SIZE as f32
                     ));
-                    set_rate.set(format!("{:.0} Hz → 12000 Hz", capture.sample_rate()));
                     set_status
                         .set("Listening for FT8 · decoding near each UTC slot end".to_owned());
                     let mut state = monitor.borrow_mut();
@@ -769,7 +767,6 @@ pub fn App() -> impl IntoView {
             <crate::radio::RadioPanel control=radio_control visible=Signal::derive(move || tab.get() == Tab::Radio) />
             <div class="station-workspace" class:contact-layout=move || stations_visible.get()>
             <section class="monitor spectrum-panel" aria-label="Audio input monitor" hidden=move || !spectrum_visible.get()>
-                <div class="toolbar"><h2>"FT8 waterfall"</h2><span class="rate">"Sample rate: " {move || rate.get()}</span></div>
                 <div class="decode-activity" class:decoding=move || decoding.get()>
                     <span class="decode-spinner" aria-hidden="true"></span>
                     <span role="status">{move || decode_activity.get()}</span>
@@ -784,10 +781,6 @@ pub fn App() -> impl IntoView {
                     let lag = recovery_lag.get().map(|s| format!(" · recovery lag at last update: {s:.1} s")).unwrap_or_default();
                     format!("{slot} · {recovery}{lag}")
                 }}</p>
-                <div class="waterfall-caption">
-                    <span>{format!("{low_hz:.0}–{high_hz:.0} audio Hz · decoder passband")}</span>
-                    <span>"Newest at top · 60 s history"</span>
-                </div>
                 <div class="waterfall-layout">
                     <div class="frequency-axis" aria-label="Audio frequency in hertz">
                         {[low_hz, 500.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0, 3500.0, high_hz]

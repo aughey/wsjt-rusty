@@ -45,8 +45,7 @@ table { width: 100%; border-collapse: collapse; font-size: .875rem; font-variant
 th, td { padding: .75rem .5rem; border-bottom: 1px solid #2b3b4e; text-align: left; white-space: nowrap; }
 th { color: #aabccc; font-weight: 500; }
 .message { color: #68dec8; font-family: ui-monospace, monospace; }
-.waterfall-caption { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5rem; margin: 1.25rem 0 .75rem; color: #aabccc; font-size: .875rem; }
-.waterfall-layout { display: grid; grid-template-columns: minmax(0, 1fr) 2.75rem; grid-template-rows: 1.75rem auto; gap: .25rem .5rem; }
+.waterfall-layout { display: grid; grid-template-columns: minmax(0, 1fr) 2.75rem; grid-template-rows: 1.3125rem auto; gap: .125rem .5rem; }
 .frequency-axis { position: relative; grid-column: 1; color: #aabccc; font-size: .875rem; font-variant-numeric: tabular-nums; }
 .frequency-axis span { position: absolute; transform: translateX(-50%); }
 .frequency-axis .first-tick { transform: none; }
@@ -218,11 +217,12 @@ button.transmit { background: #ffc2d8; border-color: #ffc2d8; color: #42172b; }
 .card-sort button { padding: .35rem .7rem; }
 .conversation-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .station-location { font-size: .8rem; color: #b8cbdc; }
+.contact-map-panel { position: relative; overflow: hidden; }
+.map-accessibility { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 #contact-map { height: clamp(20rem, 50vh, 38rem); width: 100%; background: #172c3e; border: 1px solid #52667a; border-radius: .5rem; }
 #contact-map canvas { border-radius: 0; }
 #contact-map .ol-attribution { color: #102030; }
 #contact-map .ol-control button { padding: 0; }
-#contact-map-detail, #contact-map-status, .contact-map-panel > p { color: #aabccc; font-size: .85rem; }
 
 .conversation.contacted { filter: grayscale(1); opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgb(172 193 211 / 20%) 6px 8px, transparent 8px 14px); border-style: dashed; }
 .conversation.contacted .conversation-state { font-weight: 700; }
@@ -280,12 +280,9 @@ footer { margin-top: 1rem; }
 .contact-layout .timing, .contact-layout .waveform-panel { display: none; }
 .contact-layout #waterfall { height: clamp(13rem, 28vh, 23rem); }
 .contact-layout #contact-map { height: clamp(13rem, 28vh, 23rem); }
-.contact-layout .waterfall-caption { margin-top: .5rem; }
 .contact-layout .waterfall-settings { margin-top: .5rem; }
 .contact-layout .toolbar { margin-bottom: .6rem; }
 .contact-layout .stations-panel { padding: 1rem; }
 .contact-layout .stations-panel > p { margin-block: .4rem; }
-.map-explanation { color: #aabccc; font-size: .85rem; margin-bottom: .65rem; }
-.map-explanation summary { cursor: pointer; }
 
 footer summary { cursor: pointer; }

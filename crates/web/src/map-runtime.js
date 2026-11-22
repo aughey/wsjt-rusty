@@ -8,7 +8,7 @@ function loadLibrary() {
         const script = document.createElement('script');
         script.src = new URL('vendor/ol.js', document.baseURI).href;
         script.onload = () => resolve(globalThis.ol);
-        script.onerror = () => { script.remove(); library = undefined; reject(new Error('OpenLayers could not load. Close and reopen the map to retry.')); };
+        script.onerror = () => { script.remove(); library = undefined; reject(new Error('OpenLayers could not load. Leave Stations and return to retry.')); };
         document.head.append(script);
     });
     return library;
