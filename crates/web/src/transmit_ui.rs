@@ -110,6 +110,8 @@ pub fn saved_callsign() -> String {
 
 #[component]
 pub fn StationsToContact(
+    visible: Signal<bool>,
+    configuration: Signal<bool>,
     queue: RwSignal<StationQueue>,
     mine: RwSignal<String>,
     grid: RwSignal<String>,
@@ -246,7 +248,7 @@ pub fn StationsToContact(
             })
     });
     Effect::new(move |_| {
-        if output_supported() {
+        if configuration.get() && output_supported() {
             refresh_outputs(false);
         }
     });
@@ -255,12 +257,15 @@ pub fn StationsToContact(
         queue.update(|q| q.stop());
         let _ = tx.with_value(stop_transmitter);
         playing.set(false);
+        busy.set(false);
+        current_plan.set_value(None);
+        phase.set(String::new());
         preparing.set(false);
         status.set("Contacting paused. Waiting for Start contacting.".into());
     };
     // Audio input Stop/restart also disarms the queue, including output preparation.
     Effect::new(move |_| {
-        if !running.get() {
+        if !running.get() || !visible.get() {
             stop();
         }
     });
@@ -296,134 +301,135 @@ pub fn StationsToContact(
             }
         });
     };
-    let _timer = StoredValue::new_local(Interval::new(100, move || {
-        let now = js_sys::Date::now();
-        if (now / 1000.0).floor() != (clock.get_untracked() / 1000.0).floor() {
-            clock.set(now);
-            if running.get_untracked() {
-                queue.update(|q| q.sort_cycle(now, &grid.get_untracked()));
-            }
-            if running.get_untracked() && auto_remove.get_untracked() {
-                queue.update(|q| q.expire_waiting(now, cq_timeout.get_untracked()));
-            }
-        }
-        let active = tx.with_value(transmitter_busy);
-        playing.set(tx.with_value(transmitter_playing));
-        phase.set(tx.with_value(transmitter_phase));
-        if let Some(id) = current_plan.get_value() {
-            let still_pending =
-                queue.with_untracked(|q| q.pending.as_ref().is_some_and(|p| p.id == id));
-            if !still_pending {
-                let _ = tx.with_value(|tx| {
-                    if queue.with_untracked(|q| q.enabled) {
-                        cancel_current(tx)
-                    } else {
-                        stop_transmitter(tx)
-                    }
-                });
-                current_plan.set_value(None);
-            } else if !active {
-                let success = tx.with_value(transmitter_outcome) == "complete";
-                queue.update(|q| q.complete(id, success));
-                current_plan.set_value(None);
-                status.set(tx.with_value(transmitter_status));
-            }
-        }
-        busy.set(active);
-        if active || preparing.get_untracked() || !queue.with_untracked(|q| q.enabled) {
+    let timer = StoredValue::new_local(None::<Interval>);
+    Effect::new(move |_| {
+        timer.update_value(|timer| *timer = None);
+        if !visible.get() {
             return;
         }
-        if !running.get_untracked() {
-            stop();
-            return;
-        }
-        if !tx.with_value(transmitter_prepared) {
-            queue.update(|q| q.stop());
-            status.set(format!(
-                "{} Click Start contacting to resume.",
-                tx.with_value(transmitter_status)
-            ));
-            return;
-        }
-        if use_radio.get_untracked() {
-            if !radio.configured() {
+        timer.set_value(Some(Interval::new(100, move || {
+            let now = js_sys::Date::now();
+            if (now / 1000.0).floor() != (clock.get_untracked() / 1000.0).floor() {
+                clock.set(now);
+                if running.get_untracked() {
+                    queue.update(|q| q.sort_cycle(now, &grid.get_untracked()));
+                }
+                if running.get_untracked() && auto_remove.get_untracked() {
+                    queue.update(|q| q.expire_waiting(now, cq_timeout.get_untracked()));
+                }
+            }
+            let active = tx.with_value(transmitter_busy);
+            playing.set(tx.with_value(transmitter_playing));
+            phase.set(tx.with_value(transmitter_phase));
+            if let Some(id) = current_plan.get_value() {
+                let still_pending =
+                    queue.with_untracked(|q| q.pending.as_ref().is_some_and(|p| p.id == id));
+                if !still_pending {
+                    let _ = tx.with_value(|tx| {
+                        if queue.with_untracked(|q| q.enabled) {
+                            cancel_current(tx)
+                        } else {
+                            stop_transmitter(tx)
+                        }
+                    });
+                    current_plan.set_value(None);
+                } else if !active {
+                    let success = tx.with_value(transmitter_outcome) == "complete";
+                    queue.update(|q| q.complete(id, success));
+                    current_plan.set_value(None);
+                    status.set(tx.with_value(transmitter_status));
+                }
+            }
+            busy.set(active);
+            if active || preparing.get_untracked() || !queue.with_untracked(|q| q.enabled) {
+                return;
+            }
+            if !running.get_untracked() {
                 stop();
-                status.set("Radio disconnected; contacting paused.".into());
                 return;
             }
-            if !radio.ready() {
+            if !tx.with_value(transmitter_prepared) {
+                queue.update(|q| q.stop());
+                status.set(format!(
+                    "{} Click Start contacting to resume.",
+                    tx.with_value(transmitter_status)
+                ));
                 return;
             }
-        }
-        let mut plan = None;
-        queue.update(|q| {
-            q.open_frequency_hz = crate::open_frequency::recent_choice(
-                open_frequency.get_untracked(),
-                js_sys::Date::now(),
-            );
-            plan = q.plan(
-                js_sys::Date::now(),
-                &mine.get_untracked(),
-                &grid.get_untracked(),
-            )
-        });
-        let Some(plan) = plan else {
-            return;
-        };
-        queue.update(|q| q.record_frequency(plan.id, radio.frequency()));
-        let samples = match transmit::audio(&plan.message, plan.frequency_hz) {
-            Ok(pcm) => pcm,
-            Err(e) => {
-                queue.update(|q| q.complete(plan.id, false));
-                status.set(e.into());
-                return;
-            }
-        };
-        if use_radio.get_untracked()
-            && let Err(e) = radio.reserve()
-        {
-            queue.update(|q| q.complete(plan.id, false));
-            status.set(e);
-            return;
-        }
-        let promise = tx.with_value(|tx| {
-            play_transmission(
-                tx,
-                &samples,
-                plan.receive_slot as f64,
-                &output_id.get_untracked(),
-                use_radio.get_untracked(),
-                plan.start_ms,
-            )
-        });
-        current_plan.set_value(Some(plan.id));
-        busy.set(true);
-        status.set(format!("{} · scheduled {}", plan.target, plan.message));
-        spawn_local(async move {
-            if let Err(e) = JsFuture::from(promise).await {
-                if current_plan.try_with_value(|id| *id).flatten() != Some(plan.id) {
+            if use_radio.get_untracked() {
+                if !radio.configured() {
+                    stop();
+                    status.set("Radio disconnected; contacting paused.".into());
                     return;
                 }
-                queue.update(|q| q.complete(plan.id, false));
-                current_plan.set_value(None);
-                status.set(format!("Transmit paused: {}", error_text(e)));
+                if !radio.ready() {
+                    return;
+                }
             }
-        });
-    }));
+            let mut plan = None;
+            queue.update(|q| {
+                q.open_frequency_hz = crate::open_frequency::recent_choice(
+                    open_frequency.get_untracked(),
+                    js_sys::Date::now(),
+                );
+                plan = q.plan(
+                    js_sys::Date::now(),
+                    &mine.get_untracked(),
+                    &grid.get_untracked(),
+                )
+            });
+            let Some(plan) = plan else {
+                return;
+            };
+            queue.update(|q| q.record_frequency(plan.id, radio.frequency()));
+            let samples = match transmit::audio(&plan.message, plan.frequency_hz) {
+                Ok(pcm) => pcm,
+                Err(e) => {
+                    queue.update(|q| q.complete(plan.id, false));
+                    status.set(e.into());
+                    return;
+                }
+            };
+            if use_radio.get_untracked()
+                && let Err(e) = radio.reserve()
+            {
+                queue.update(|q| q.complete(plan.id, false));
+                status.set(e);
+                return;
+            }
+            let promise = tx.with_value(|tx| {
+                play_transmission(
+                    tx,
+                    &samples,
+                    plan.receive_slot as f64,
+                    &output_id.get_untracked(),
+                    use_radio.get_untracked(),
+                    plan.start_ms,
+                )
+            });
+            current_plan.set_value(Some(plan.id));
+            busy.set(true);
+            status.set(format!("{} · scheduled {}", plan.target, plan.message));
+            spawn_local(async move {
+                if let Err(e) = JsFuture::from(promise).await {
+                    if current_plan.try_with_value(|id| *id).flatten() != Some(plan.id) {
+                        return;
+                    }
+                    queue.update(|q| q.complete(plan.id, false));
+                    current_plan.set_value(None);
+                    status.set(format!("Transmit paused: {}", error_text(e)));
+                }
+            });
+        })));
+    });
     view! {
-        <section class="stations-panel results" aria-label="Stations to contact">
-            <div class="toolbar"><h2>"Stations to contact"</h2><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+        <Show when=move || configuration.get()>
+        <section class="contact-configuration results" aria-label="Contact configuration">
+            <h2>"Contact configuration"</h2>
             <label><input type="checkbox" prop:checked=move || find_open_frequency.get() on:change=move |ev| find_open_frequency.set(event_target_checked(&ev)) />"find an open frequency"</label>
             <p>"Uses up to 60 seconds of available waterfall history to choose a quiet 50 Hz transmit space within 100–3000 audio Hz. Each new contact gets a new choice, held through retries and replies. Changes apply to the next contact. This estimates occupancy; it cannot guarantee a clear channel."</p>
             <p hidden=move || { let _ = clock.get(); !find_open_frequency.get() || playing.get() || queue.with(|q| q.active.is_some()) || crate::open_frequency::recent_choice(open_frequency.get(), js_sys::Date::now()).is_some() }>"Waiting for waterfall data before choosing a transmit frequency."</p>
-            <div class="card-sort" aria-label="Sort stations to contact">
-                <span>"Sort each cycle:"</span>
-                <label><input type="checkbox" prop:checked=move || sort_state.get() on:change=move |ev| sort_state.set(event_target_checked(&ev)) />"State · CQ first"</label>
-                <label><input type="checkbox" prop:checked=move || sort_signal.get() on:change=move |ev| sort_signal.set(event_target_checked(&ev)) />"Signal ↓"</label>
-                <label><input type="checkbox" prop:checked=move || sort_distance.get() on:change=move |ev| sort_distance.set(event_target_checked(&ev)) />"Distance ↑"</label>
-                <span>"Active first · penalized last · checked keys: state, signal, distance (set My grid)"</span>
-            </div>
-            <p>"Click a conversation below to move that station here. Start contacting enables CQ-triggered calls and the ensuing exchange. Queued frequencies are searched first; full-band decoding continues. One station at a time; stations in other contacts wait for a fresh CQ."</p>
+            <p>"Open Conversations and click a station to move it here. Start contacting enables CQ-triggered calls and the ensuing exchange. Queued frequencies are searched first; full-band decoding continues. One station at a time; stations in other contacts wait for a fresh CQ."</p>
             <div class="transmit-settings">
                 <label><input type="checkbox" prop:checked=move || auto_remove.get()
                     on:change=move |ev| auto_remove.set(event_target_checked(&ev)) />"Automatically remove stations without CQ"</label>
@@ -431,8 +437,8 @@ pub fn StationsToContact(
                     prop:value=move || cq_timeout.get() disabled=move || !auto_remove.get()
                     on:change=move |ev| cq_timeout.set(event_target_value(&ev).parse::<u32>().ok().filter(|s| *s > 0).unwrap_or(180)) /></label>
             </div>
-            <p>"Measured from the last CQ's end while receiving. Active exchanges are kept; stations with no CQ get a full timeout."</p>
-            <details class="queue-settings" open><summary>"Station and transmit settings"</summary>
+            <p>"Measured from the last CQ's end. Checked while Stations is visible and again on return; stations with no CQ get a full timeout."</p>
+
             <div class="transmit-settings">
                 <label>"My callsign"<input prop:value=move || mine.get() disabled=move || busy.get() || preparing.get() || queue.with(|q| q.enabled)
                     on:input=move |ev| mine.set(event_target_value(&ev).trim().to_ascii_uppercase()) placeholder="W9XYZ" /></label>
@@ -458,14 +464,27 @@ pub fn StationsToContact(
             <p hidden=move || !use_radio.get() || radio.configured() || busy.get()>"Connect the radio and configure PTT in the radio panel before transmitting."</p>
 
 
-            </details>
+
             <div class="tx-level">
                 <label for="tx-attenuation">"TX audio attenuation"</label>
                 <input id="tx-attenuation" type="range" min="0" max="60" step="1" prop:value=move || attenuation.get()
                     aria-valuetext=move || format!("{} dB attenuation", attenuation.get())
                     on:input=move |ev| attenuation.set(event_target_value(&ev).parse::<f32>().ok().filter(|db| db.is_finite()).unwrap_or(60.0).clamp(0.0,60.0)) />
                 <output for="tx-attenuation">{move || format!("−{:.0} dB · {:.1}% amplitude", attenuation.get(), 100.0*10.0_f32.powf(-attenuation.get()/20.0))}</output>
-                <p>"Move right to lower the radio’s audio drive. Applies while transmitting and is saved in this browser."</p>
+                <p>"Move right to lower the radio’s audio drive. Saved in this browser; set before Start contacting."</p>
+            </div>
+            <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. After four initial calls with no reply, the station moves to the back, sorts behind other stations for three minutes and waits for a fresh CQ. Later stages allow three transmissions; attempts stop after eight transmissions or three minutes. Removing or moving an active station to the back cancels its attempt. Move to front and sorting keep the current exchange active. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
+        </section>
+        </Show>
+        <Show when=move || visible.get()>
+        <section class="stations-panel results" aria-label="Stations to contact">
+            <div class="toolbar"><h2>"Stations to contact"</h2><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+            <div class="card-sort" aria-label="Sort stations to contact">
+                <span>"Sort each cycle:"</span>
+                <label><input type="checkbox" prop:checked=move || sort_state.get() on:change=move |ev| sort_state.set(event_target_checked(&ev)) />"State · CQ first"</label>
+                <label><input type="checkbox" prop:checked=move || sort_signal.get() on:change=move |ev| sort_signal.set(event_target_checked(&ev)) />"Signal ↓"</label>
+                <label><input type="checkbox" prop:checked=move || sort_distance.get() on:change=move |ev| sort_distance.set(event_target_checked(&ev)) />"Distance ↑"</label>
+                <span>"Active first · penalized last · checked keys: state, signal, distance (set My grid)"</span>
             </div>
             <p class="transmit-validation">{move || validation.get().err().unwrap_or("")}</p>
             <div class="toolbar">
@@ -552,8 +571,9 @@ pub fn StationsToContact(
                     }
                 } />
             </div>
-            <p class="spectrum-detail">"CQ responses use the immediately following UTC slot. After four initial calls with no reply, the station moves to the back, sorts behind other stations for three minutes and waits for a fresh CQ. Later stages allow three transmissions; attempts stop after eight transmissions or three minutes. Removing or moving an active station to the back cancels its attempt. Move to front and sorting keep the current exchange active. Stop, hidden tabs and input interruption pause contacting. Physical radio timing remains uncalibrated."</p>
+
         </section>
+        </Show>
     }
 }
 

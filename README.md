@@ -103,7 +103,28 @@ audio into the browser's default input (select it in browser/OS settings).
 Microphone access and AudioWorklet require localhost or HTTPS. Audio stays in
 the browser; the capture graph outputs silence to avoid speaker feedback.
 
-The FFT waterfall and waveform remain live while two dedicated WASM workers run
+The full-page app has tabs for **Stations to contact**, **Spectrum**, **Radio
+control**, **Contact configuration**, **Log**, **Decoded messages**, and
+**Conversations**. Stations to contact combines the waterfall, world map and
+station cards in a responsive flex layout. Callsign, grid, audio output, PTT
+selection and attenuation live in Contact configuration. Start listening and
+Stop remain available above every tab. Arrow keys, Home and End navigate tabs.
+
+Only the visible view renders live content: hidden spectrum views stop their
+animation/FFT work, the map is disposed when leaving Stations, and radio
+readback polling pauses outside Radio control. Leaving Stations stops and
+disarms contacting, including pending audio/PTT; returning requires Start
+contacting again. Manual radio TX is released on leaving Radio control. Queue
+sorting, expiry checks and auto-add run only while Stations is visible; elapsed
+CQ time is checked again on return. Settings and selections survive tab changes.
+The shared receive session, bounded decode/conversation history and durable
+contact-log writes continue while listening so changing views does not lose
+received evidence or unsaved contact records. Hidden tabs do not render cards,
+message tables or log pages. The map opens with Stations and requests
+OpenStreetMap tiles only while mounted.
+
+While a spectrum view is visible, the FFT waterfall and waveform remain live.
+Two dedicated WASM workers run
 the existing Rust `Ft8Decoder` through `AudioStream`: 100–4000 audio Hz and two
 passes in each lane. The slot worker handles deadline-sensitive recent-audio
 attempts; an independent recovery worker retains the full 30-second windows and
@@ -263,7 +284,7 @@ marks. Reduced-motion settings use a steady amber glow. These local playback
 indicators are separate from received evidence and do not confirm RF delivery.
 
 **TX audio attenuation** reduces output from 0 to 60 dB. Move the slider right
-to lower drive; it applies smoothly during playback and between transmissions.
+to lower drive. Set it in Contact configuration before starting contacting.
 For example, 20 dB attenuation gives 10% of the original audio amplitude.
 Callsign, grid, audio device, attenuation and radio settings remain saved per browser/site.
 **Refresh audio outputs** requests device access when necessary; temporary
@@ -349,6 +370,19 @@ Native workspace checks do not compile browser-only code; also run:
 cargo check -p wsjt-web --target wasm32-unknown-unknown
 cargo clippy -p wsjt-web --target wasm32-unknown-unknown -- -D warnings
 node --test crates/web/tests/capture-worklet.cjs crates/web/tests/capture-runtime.cjs crates/web/tests/decoder-worker.cjs crates/web/tests/transmit-runtime.cjs
+```
+
+The `crates/web/tests/tabs-browser.cjs` Playwright check covers the full-page
+shell, all seven tabs, settings retained across tab changes, hidden spectrum
+painting and map disposal, live decoding from the independent FT8 recording,
+contact disarming, keyboard navigation, phone layout and Stop/restart input
+release. `radio-browser.cjs` also verifies that hidden radio controls do not
+poll and that leaving manual TX releases the port. Serve an isolated release
+build, then run with Playwright on `NODE_PATH`:
+
+```sh
+node crates/web/tests/tabs-browser.cjs http://127.0.0.1:8093
+node crates/web/tests/radio-browser.cjs http://127.0.0.1:8093
 ```
 
 The optional `crates/web/tests/conversations-browser.cjs` Playwright check runs
@@ -524,16 +558,16 @@ no higher-priority station is eligible. Conversations retain one-shot sorting.
 Selecting a conversation puts its caller at the front of the waiting queue.
 Card movement animations are disabled.
 
-**Open map** displays a pan/zoom world map using bundled OpenLayers 10.10.0 and
+The Stations to contact tab displays a pan/zoom world map using bundled OpenLayers 10.10.0 and
 OpenStreetMap tiles. Great-circle lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or local attempts. Colors follow received stages; a white home marker uses
 My grid. Select a marker for callsign, grid, coordinates and distance. Unknown
-grids are omitted. Opening the optional map makes external tile requests to
+grids are omitted. The visible map makes external tile requests to
 OpenStreetMap, with visible attribution and normal browser caching. No callsign
 lookup or spot upload is performed.
 
 ### Local contact log and ADIF
 
-The Contact log section has Contacts and Evidence tabs, with UTC dates and times,
+The Log tab has Contacts and Evidence views, with UTC dates and times,
 our callsign/grid, the partner/grid, software outcome and timestamped evidence.
 Received decodes retain payload, SNR and audio frequency; successful local playback
 is separately labeled TX audio. Failed/canceled playback is never recorded as sent.

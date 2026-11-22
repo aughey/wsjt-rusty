@@ -303,7 +303,8 @@ display successful initial-call audio counts per queued station, resetting on
 capture restart; failed/canceled audio does not count. Waiting stations expire
 from the last CQ frame end with a saved enabled-by-default 180-second timeout;
 unheard stations get a full timeout and active exchanges are exempt. Expiry runs
-while receiving even when contacting is paused. Keep contact logs on expiry.
+while receiving with Stations visible, even when contacting is paused; elapsed
+time is checked again when returning to Stations. Keep contact logs on expiry.
 Cap exchanges at eight transmissions/180 seconds, then move back and await CQ.
 Move to back/remove cancels an active attempt. Completed exchanges automatically leave the queue and retain their persistent contact record. Remove all cancels, disarms and clears the queue without deleting log records.
 Keep local sent status separate from received evidence and RF/QSO confirmation.
@@ -421,7 +422,7 @@ scope, not existing shared services.
 Queued station cards share `exchange_ui.rs` with conversations for the six received
 exchange stages. The queue retains a bounded conversation tracker independently
 of board expiry; local playback never fills received stage evidence. Transmit
-audio has a saved 0–60 dB output attenuation slider, available during playback;
+audio has a saved 0–60 dB output attenuation slider in Contact configuration;
 `transmit-runtime.js` applies a smooth gain stage after waveform generation.
 Active local audio pulses amber on the station card and outgoing step, driven
 by the AudioContext playback clock. Successful completed audio retains a cyan
@@ -477,3 +478,20 @@ spectra into occupancy or refresh the last receive-spectrum timestamp while blan
 
 Automatic open-frequency TX selection is bounded to 100–3000 audio Hz, with
 the full footprint and guards inside that range; RX keeps its existing passband.
+
+
+### Application tabs
+
+The browser shell uses full-page tabs: Stations to contact (responsive flex
+waterfall/map/cards), Spectrum, Radio control, Contact configuration, Log,
+Decoded messages and Conversations. Keep input Start/Stop global. Hidden views
+must suspend rendering/FFT/map work; radio readback polls run only in Radio
+control. Keep radio session ownership alive for shared PTT, including watchdogs
+and release cleanup. Leaving Stations disarms/cancels contacting; leaving Radio
+releases manual TX. Contact configuration owns callsign/grid/output/PTT choice
+and attenuation presentation, retaining settings across navigation. Station
+sorting, expiry checks and auto-add are active only in Stations; elapsed CQ time
+still expires on return. Shared listening, bounded histories and durable log
+writes survive tab changes. Log persistence/history loading is a session service,
+independent of whether its table is visible. Preserve accessible tab keyboard
+navigation (arrows/Home/End), selection and panel labeling.

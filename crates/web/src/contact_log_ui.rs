@@ -38,6 +38,7 @@ fn utc(ms: f64) -> String {
 
 #[component]
 pub fn ContactLog(
+    visible: Signal<bool>,
     queue: RwSignal<StationQueue>,
     contacted: RwSignal<Vec<String>>,
     ready: RwSignal<bool>,
@@ -160,6 +161,7 @@ pub fn ContactLog(
         }
     };
     view! {
+        <Show when=move || visible.get()>
         <section class="results contact-log" aria-label="Local contact log">
             <div class="toolbar"><h2>"Contact log"</h2><span>{move || format!("{} attempts · {} unsaved updates", page.with(|p| p.total), queue.with(|q| q.log_pending.len()))}</span></div>
             <p>"Operator contact attempts, stored locally in this browser/site. Completed means the software exchange ended; local playback does not confirm RF delivery or a mutual QSO. Download backups before clearing browser data."</p>
@@ -196,5 +198,6 @@ pub fn ContactLog(
                 }.into_any()).unwrap_or_else(|| view! { <p>"Choose View events on a contact to inspect its timestamped evidence."</p> }.into_any())}
             </div>
         </section>
+        </Show>
     }
 }

@@ -42,7 +42,7 @@ pub fn ContactMap(
     grid: RwSignal<String>,
     mine: RwSignal<String>,
 ) -> impl IntoView {
-    let shown = RwSignal::new(false);
+    let shown = RwSignal::new(true);
     let markers = Memo::new(move |_| {
         // Per-station latest grid survives message trimming, bounded by retained cards.
         let mut points = std::collections::BTreeMap::new();
@@ -176,7 +176,7 @@ pub fn ContactMap(
                     if !shown.get_untracked() { dispose_map(); }
                 }>{move || if shown.get() { "Close map" } else { "Open map" }}</button>
             </div>
-            <p>"Decoded grid centers, not exact station positions. Lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or a local attempt, not confirmed RF delivery. Colors follow received exchange stages. Set My grid for approximate distances. Unknown grids are omitted. Opening the map requests tiles from OpenStreetMap."</p>
+            <details class="map-explanation"><summary>"About map locations and paths"</summary><p>"Decoded grid centers, not exact station positions. Lines connect known endpoints of observed exchanges; dashed lines indicate inferred context or a local attempt, not confirmed RF delivery. Colors follow received exchange stages. Set My grid for approximate distances. Unknown grids are omitted. Opening the map requests tiles from OpenStreetMap."</p></details>
             <div hidden=move || !shown.get()>
                 <div id="contact-map" tabindex="0" aria-label="World map of decoded stations. Arrow keys pan; plus and minus zoom." />
                 <p id="contact-map-status" role="status" />

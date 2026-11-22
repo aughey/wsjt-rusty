@@ -483,7 +483,7 @@ impl RadioSettings {
 }
 
 #[component]
-pub fn RadioPanel(control: RadioControl) -> impl IntoView {
+pub fn RadioPanel(control: RadioControl, visible: Signal<bool>) -> impl IntoView {
     let ports = Rc::new(RefCell::new(Ports::default()));
     let alive = Rc::new(Cell::new(true));
     let ui = Ui {
@@ -546,7 +546,10 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
     let poll_ports = ports.clone();
     let poll_alive = alive.clone();
     let interval = Interval::new(2000, move || {
-        if ui.active.get_untracked() && !ui.tx.get_untracked() && !control.reserved.get_untracked()
+        if visible.get_untracked()
+            && ui.active.get_untracked()
+            && !ui.tx.get_untracked()
+            && !control.reserved.get_untracked()
         {
             run(poll_ports.clone(), poll_alive.clone(), ui, vec![]);
         }
@@ -830,7 +833,7 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
     };
     let rx_ports = ports.clone();
     let rx_alive = alive.clone();
-    let receive = move |_| {
+    let receive = move |_: ()| {
         // Closing releases either line or modern CAT PTT even if a command is pending.
         rx_ports.borrow_mut().close();
         ui.polling.set(false);
@@ -850,7 +853,25 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
             );
         }
     };
+    let leave_radio = receive.clone();
+    Effect::new(move |_| {
+        // A manual TX request may not survive navigation away from its controls.
+        if !visible.get() && ui.tx.get_untracked() && !control.reserved.get_untracked() {
+            leave_radio(());
+        }
+    });
+    // Keep non-Send port callbacks with the session when the view is unmounted.
+    let connect = StoredValue::new_local(connect);
+    let disconnect = StoredValue::new_local(disconnect);
+    let tune = StoredValue::new_local(tune);
+    let set_mode = StoredValue::new_local(set_mode);
+    let set_power = StoredValue::new_local(set_power);
+    let read_power = StoredValue::new_local(read_power);
+    let connect_ptt = StoredValue::new_local(connect_ptt);
+    let transmit = StoredValue::new_local(transmit);
+    let receive = StoredValue::new_local(receive);
     view! {
+        <Show when=move || visible.get()>
         <section class="radio-panel monitor" aria-label="IC-718 radio control">
             <div class="toolbar"><h2>"Icom IC-718 control"</h2><strong class="radio-dial">{move || format!("{} · {}", ui.dial.get(), ui.actual_mode.get())}</strong></div>
             <div class="radio-controls">
@@ -858,12 +879,12 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
                     {wsjt_rig::BAUD_RATES.iter().map(|b| view! { <option value=b.to_string()>{b.to_string()}</option> }).collect_view()}
                 </select></label>
                 <label>"CI-V hex "<input class="short" prop:value=move || address.get() disabled=move || ui.active.get() on:input=move |e| address.set(event_target_value(&e)) /></label>
-                <button on:click=connect disabled=move || ui.active.get() || !supported()>"Connect radio"</button>
-                <button class="secondary" on:click=disconnect disabled=move || !ui.active.get() && !ptt_active.get()>"Disconnect radio"</button>
+                <button on:click=move |ev| connect.with_value(|f| f(ev)) disabled=move || ui.active.get() || !supported()>"Connect radio"</button>
+                <button class="secondary" on:click=move |ev| disconnect.with_value(|f| f(ev)) disabled=move || !ui.active.get() && !ptt_active.get()>"Disconnect radio"</button>
             </div>
             <div class="radio-controls">
                 <label>"Dial frequency (Hz) "<input inputmode="numeric" prop:value=move || frequency.get() on:input=move |e| frequency.set(event_target_value(&e)) /></label>
-                <button on:click=tune disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Set frequency"</button>
+                <button on:click=move |ev| tune.with_value(|f| f(ev)) disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Set frequency"</button>
                 <label>"FT8 preset "<select prop:value=move || frequency.get() on:change=move |e| { let value = event_target_value(&e); if !value.is_empty() { frequency.set(value); } }>
                     <option value="">"Choose band…"</option>
                     {[("80 m",3573000),("40 m",7074000),("30 m",10136000),("20 m",14074000),("17 m",18100000),("15 m",21074000),("12 m",24915000),("10 m",28074000)].into_iter().map(|(band,hz)| view! { <option value=hz.to_string()>{band}</option> }).collect_view()}
@@ -871,27 +892,28 @@ pub fn RadioPanel(control: RadioControl) -> impl IntoView {
                 <label>"Mode "<select prop:value=move || mode.get().to_string() on:change=move |e| { if let Ok(v) = event_target_value(&e).parse() { mode.set(v); } }>
                     {Mode::ALL.into_iter().map(|m| view! { <option value=(m as u8).to_string()>{m.to_string()}</option> }).collect_view()}
                 </select></label>
-                <button on:click=set_mode disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Set mode"</button>
+                <button on:click=move |ev| set_mode.with_value(|f| f(ev)) disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Set mode"</button>
             </div>
             <p class="status" role="status">{move || ui.status.get()}</p>
             <p class="status" hidden=move || storage_status.get().is_empty()>{move || storage_status.get()}</p>
             <div class="radio-controls">
                 <label>"RF power setting (0–255) "<input class="short" type="number" min="0" max="255" prop:value=move || power.get().to_string() on:input=move |e| power.set(event_target_value(&e)) /></label>
-                <button on:click=set_power disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Set RF power"</button>
-                <button class="secondary" on:click=read_power disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Read RF power"</button>
+                <button on:click=move |ev| set_power.with_value(|f| f(ev)) disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Set RF power"</button>
+                <button class="secondary" on:click=move |ev| read_power.with_value(|f| f(ev)) disabled=move || !ui.active.get() || ui.busy.get() || ui.tx.get() || control.reserved.get()>"Read RF power"</button>
                 <span>{move || format!("Readback: {} (not watts)", ui.actual_power.get())}</span>
             </div>
             <div class="radio-controls">
                 <label>"PTT method "<select prop:value=move || method.get() disabled=move || ptt_active.get() || ui.active.get() || ui.tx.get() on:change=move |e| method.set(event_target_value(&e))>
                     <option value="none">"Disabled"</option><option value="cat-rts">"RTS · same CI-V port"</option><option value="cat-dtr">"DTR · same CI-V port"</option><option value="requestToSend">"RTS · separate PTT interface"</option><option value="dataTerminalReady">"DTR · separate PTT interface"</option><option value="cat">"CAT · #82/#83 revisions only"</option>
                 </select></label>
-                <button class="secondary" on:click=connect_ptt disabled=move || !supported() || !matches!(method.get().as_str(), "requestToSend" | "dataTerminalReady") || ptt_active.get() || control.reserved.get()>"Connect PTT interface"</button>
-                <button class="transmit" on:click=transmit disabled=move || control.reserved.get() || ptt_busy.get() || ui.tx.get() || if method.get().starts_with("cat") { !ui.active.get() || ui.busy.get() } else { !ptt_ready.get() }>"Transmit (30 s max)"</button>
-                <button class="secondary" on:click=receive disabled=move || !ui.tx.get()>"Receive / unkey"</button>
+                <button class="secondary" on:click=move |ev| connect_ptt.with_value(|f| f(ev)) disabled=move || !supported() || !matches!(method.get().as_str(), "requestToSend" | "dataTerminalReady") || ptt_active.get() || control.reserved.get()>"Connect PTT interface"</button>
+                <button class="transmit" on:click=move |ev| transmit.with_value(|f| f(ev)) disabled=move || control.reserved.get() || ptt_busy.get() || ui.tx.get() || if method.get().starts_with("cat") { !ui.active.get() || ui.busy.get() } else { !ptt_ready.get() }>"Transmit (30 s max)"</button>
+                <button class="secondary" on:click=move |_| receive.with_value(|f| f(())) disabled=move || !ui.tx.get()>"Receive / unkey"</button>
             </div>
             <p class="status" role="status">{move || ptt_status.get()}</p>
             <p class="spectrum-detail">"Legacy IC-718 PTT needs an RTS/DTR interface wired to ACC SEND; a CI-V-only cable cannot key it. Match baud/address; turn CI-V 731 mode off. Presets fill the frequency field; Set frequency applies it. Select USB separately for FT8."</p>
             <p class="spectrum-detail">"PTT controls keying only; route transmit audio separately. RF power is an uncalibrated radio setting. Receive/unkey closes the ports. Release on disconnect or page exit is best effort; verify RX at the radio."</p>
         </section>
+        </Show>
     }
 }
