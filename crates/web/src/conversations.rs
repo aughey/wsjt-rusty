@@ -139,6 +139,7 @@ pub struct ExchangeSlot {
 pub struct Heard {
     pub start_ms: f64,
     pub end_ms: f64,
+    pub snr_db: f32,
     pub message: String,
     pub sender: String,
     pub stage: Stage,
@@ -316,13 +317,13 @@ impl Conversations {
     pub fn update<'a>(
         &mut self,
         now_ms: f64,
-        messages: impl IntoIterator<Item = (f64, f64, &'a str, &'a str)>,
+        messages: impl IntoIterator<Item = (f64, f64, &'a str, &'a str, f32)>,
     ) {
         let mut messages: Vec<_> = messages.into_iter().collect();
         messages.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (start, end, text, payload) in messages {
+        for (start, end, text, payload, snr_db) in messages {
             if start.is_finite() && end.is_finite() && end >= start {
-                self.hear(start, end, text, payload);
+                self.hear(start, end, text, payload, snr_db);
             }
         }
         if now_ms.is_finite() {
@@ -332,7 +333,7 @@ impl Conversations {
         self.items.sort_by_key(|c| c.display_slot);
     }
 
-    fn hear(&mut self, start: f64, end: f64, text: &str, payload: &str) {
+    fn hear(&mut self, start: f64, end: f64, text: &str, payload: &str, snr_db: f32) {
         let kind = classify(text, payload);
         let words: Vec<_> = text.split_whitespace().collect();
         let stage = match kind {
@@ -473,6 +474,7 @@ impl Conversations {
         let heard = Heard {
             start_ms: start,
             end_ms: end,
+            snr_db,
             message: text.into(),
             sender,
             stage,
@@ -532,6 +534,7 @@ mod tests {
                 start + 12_640.0,
                 text,
                 format!("{}001", "0".repeat(74)).as_str(),
+                -12.0,
             )],
         );
     }
@@ -586,7 +589,7 @@ mod tests {
         feed(&mut t, 3, "K1ABC W9XYZ R-10");
         feed(&mut t, 3, "K1ABC W9XYZ R-10");
         feed(&mut t, 3, "<...> W9XYZ R-10");
-        t.update(t.now_ms, [(0.0, 12_640.0, "K1ABC W9XYZ 73", "000")]);
+        t.update(t.now_ms, [(0.0, 12_640.0, "K1ABC W9XYZ 73", "000", -12.0)]);
         assert_eq!(t.items.len(), 1);
         assert_eq!(t.items[0].messages.len(), 3);
         assert!(!t.items[0].inferred);
@@ -626,8 +629,8 @@ mod tests {
         t.update(
             t.now_ms,
             [
-                (f64::NAN, 0.0, "K1ABC W9XYZ 73", payload.as_str()),
-                (0.0, -1.0, "K1ABC W9XYZ 73", payload.as_str()),
+                (f64::NAN, 0.0, "K1ABC W9XYZ 73", payload.as_str(), -12.0),
+                (0.0, -1.0, "K1ABC W9XYZ 73", payload.as_str(), -12.0),
             ],
         );
         assert_eq!(t.items[0].stage, Stage::Reports);
@@ -635,9 +638,15 @@ mod tests {
         let texts: Vec<_> = (0..300).map(|i| format!("K1ABC W{i}XYZ -12")).collect();
         t.update(
             start + 13_000.0,
-            texts
-                .iter()
-                .map(|text| (start, start + 12_640.0, text.as_str(), payload.as_str())),
+            texts.iter().map(|text| {
+                (
+                    start,
+                    start + 12_640.0,
+                    text.as_str(),
+                    payload.as_str(),
+                    -12.0,
+                )
+            }),
         );
         assert_eq!(t.items.len(), MAX_CONVERSATIONS);
     }

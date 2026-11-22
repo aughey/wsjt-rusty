@@ -1,13 +1,24 @@
 //! Browser-only Leptos shell. Capture and presentation belong here, outside DSP crates.
 
 pub mod annotations;
+pub mod contact_queue;
 pub mod conversations;
 pub mod message_kind;
 pub mod receiver;
 pub mod spectrum;
+pub mod transmit;
+
+#[cfg(target_arch = "wasm32")]
+mod exchange_ui;
+
+#[cfg(target_arch = "wasm32")]
+mod transmit_ui;
 
 #[cfg(target_arch = "wasm32")]
 mod app;
+
+#[cfg(target_arch = "wasm32")]
+mod radio;
 
 #[cfg(target_arch = "wasm32")]
 mod worker;

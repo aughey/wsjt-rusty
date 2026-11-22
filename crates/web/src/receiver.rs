@@ -46,12 +46,34 @@ impl AudioDecoder for ReportingDecoder {
     fn hop_samples(&self) -> usize {
         self.decoder.hop_samples()
     }
+    fn set_priority_frequencies(&mut self, frequencies: &[f32]) {
+        self.decoder.set_priority_frequencies(frequencies);
+    }
+    fn decode_with_observer(
+        &mut self,
+        audio: &[f32],
+        observer: &mut dyn FnMut(&Decode),
+    ) -> Vec<Decode> {
+        (self.activity)(true);
+        let result = self.decoder.decode_with_observer(audio, observer);
+        (self.activity)(false);
+        result
+    }
     fn decode(&mut self, audio: &[f32]) -> Vec<Decode> {
         (self.activity)(true);
         let result = self.decoder.decode(audio);
         (self.activity)(false);
         result
     }
+}
+
+/// Browser scheduling lanes; all use identical PCM normalization and FT8 settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReceiveRole {
+    #[default]
+    Combined,
+    Slot,
+    Recovery,
 }
 
 /// Sample counts provide elapsed time; UTC is anchored once at the first sample.
@@ -64,6 +86,8 @@ pub struct Receiver {
     received: u64,
     finished: bool,
     next_attempt_utc_ms: f64,
+    observer: Option<fn(&TimedDecode)>,
+    role: ReceiveRole,
 }
 
 impl Receiver {
@@ -75,6 +99,14 @@ impl Receiver {
         rate: u32,
         start_utc_ms: f64,
         activity: fn(bool),
+    ) -> Result<Self, String> {
+        Self::with_observers(rate, start_utc_ms, activity, None)
+    }
+    pub fn with_observers(
+        rate: u32,
+        start_utc_ms: f64,
+        activity: fn(bool),
+        observer: Option<fn(&TimedDecode)>,
     ) -> Result<Self, String> {
         if !start_utc_ms.is_finite() {
             return Err("invalid capture clock".into());
@@ -92,9 +124,21 @@ impl Receiver {
             received: 0,
             finished: false,
             next_attempt_utc_ms: next_attempt(start_utc_ms),
+            observer,
+            role: ReceiveRole::Combined,
         })
     }
 
+    pub fn set_role(&mut self, role: ReceiveRole) -> Result<(), String> {
+        if self.received != 0 {
+            return Err("cannot change decoding lane during capture".into());
+        }
+        self.role = role;
+        Ok(())
+    }
+    pub fn set_priority_frequencies(&mut self, frequencies: &[f32]) {
+        self.stream.set_priority_frequencies(frequencies);
+    }
     pub fn push(&mut self, offset: u64, samples: &[f32]) -> Result<Update, String> {
         if self.finished {
             return Err("capture has already finished".into());
@@ -106,13 +150,26 @@ impl Receiver {
             return Err("audio contains non-finite samples".into());
         }
         let mono = self.resampler.push(samples)?;
-        let mut decodes = self.stream.push(&mono).map_err(|e| e.to_string())?;
+        let mut emit = timed_observer(self.start_utc_ms, self.observer);
+        let mut decodes = if self.role == ReceiveRole::Slot {
+            self.stream.push_buffered(&mono).map(|_| Vec::new())
+        } else if self.observer.is_some() {
+            self.stream.push_with_observer(&mono, &mut emit)
+        } else {
+            self.stream.push(&mono)
+        }
+        .map_err(|e| e.to_string())?;
         self.received += samples.len() as u64;
         let end_ms = self.start_utc_ms + self.received as f64 / f64::from(self.rate) * 1000.0;
-        if end_ms >= self.next_attempt_utc_ms {
+        if self.role != ReceiveRole::Recovery && end_ms >= self.next_attempt_utc_ms {
             // Include timing margin around the nominal 0.5–13.14 s transmission.
             // The regular 30-second windows still recover off-clock signals.
-            decodes.extend(self.stream.decode_pending(16 * SAMPLE_RATE));
+            decodes.extend(if self.observer.is_some() {
+                self.stream
+                    .decode_pending_with_observer(16 * SAMPLE_RATE, &mut emit)
+            } else {
+                self.stream.decode_pending(16 * SAMPLE_RATE)
+            });
             self.next_attempt_utc_ms = next_attempt(end_ms);
         }
         Ok(self.update(decodes))
@@ -123,8 +180,18 @@ impl Receiver {
             return Ok(self.update(Vec::new()));
         }
         let tail = self.resampler.finish();
-        let mut decodes = self.stream.push(&tail).map_err(|e| e.to_string())?;
-        decodes.extend(self.stream.finish());
+        let mut emit = timed_observer(self.start_utc_ms, self.observer);
+        let mut decodes = if self.observer.is_some() {
+            self.stream.push_with_observer(&tail, &mut emit)
+        } else {
+            self.stream.push(&tail)
+        }
+        .map_err(|e| e.to_string())?;
+        decodes.extend(if self.observer.is_some() {
+            self.stream.finish_with_observer(&mut emit)
+        } else {
+            self.stream.finish()
+        });
         self.finished = true;
         Ok(self.update(decodes))
     }
@@ -148,6 +215,19 @@ impl Receiver {
                     }
                 })
                 .collect(),
+        }
+    }
+}
+
+fn timed_observer(origin_ms: f64, callback: Option<fn(&TimedDecode)>) -> impl FnMut(&Decode) {
+    move |decode| {
+        if let Some(callback) = callback {
+            let start_utc_ms = origin_ms + decode.start_seconds * 1000.0;
+            callback(&TimedDecode {
+                start_utc_ms,
+                end_utc_ms: start_utc_ms + FT8_DURATION_SECONDS * 1000.0,
+                decode: decode.clone(),
+            });
         }
     }
 }
@@ -179,6 +259,72 @@ mod tests {
         EVENTS.with_borrow(|events| assert_eq!(events.len(), 8));
         receiver.finish().unwrap();
         EVENTS.with_borrow(|events| assert_eq!(events.len(), 8));
+    }
+
+    #[test]
+    fn incremental_events_arrive_during_the_attempt_with_utc_and_no_repeats() {
+        thread_local! { static EVENTS: std::cell::RefCell<Vec<(bool, String, f64)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+        let origin = 1_700_000_010_000.0;
+        let mut receiver = Receiver::with_observers(
+            12000,
+            origin,
+            |active| EVENTS.with_borrow_mut(|e| e.push((active, String::new(), 0.0))),
+            Some(|d| {
+                EVENTS.with_borrow_mut(|e| e.push((true, d.decode.message.clone(), d.start_utc_ms)))
+            }),
+        )
+        .unwrap();
+        receiver.set_priority_frequencies(&[1200.0]);
+        let frame = wsjt_rusty::ft8::transmit::audio("CQ K1ABC FN42", 1200.0).unwrap();
+        let mut pcm = vec![0.0; 162000];
+        pcm[6000..6000 + frame.len()].copy_from_slice(&frame);
+        let result = receiver.push(0, &pcm).unwrap();
+        assert_eq!(result.decodes.len(), 1);
+        EVENTS.with_borrow(|events| {
+            assert_eq!(events.len(), 3);
+            assert!(events[0].0);
+            assert!(events[1].1.starts_with("CQ K1ABC"));
+            assert!(!events[2].0);
+            assert!((events[1].2 - origin - 500.0).abs() < 30.0);
+        });
+        assert!(receiver.finish().unwrap().decodes.is_empty());
+    }
+
+    #[test]
+    fn slot_and_recovery_lanes_have_independent_schedules_and_full_settings() {
+        thread_local! { static COUNTS: std::cell::RefCell<[usize;2]> = const { std::cell::RefCell::new([0,0]) }; }
+        let mut slot = Receiver::with_decode_activity(12000, 0.0, |active| {
+            if active {
+                COUNTS.with_borrow_mut(|c| c[0] += 1);
+            }
+        })
+        .unwrap();
+        let mut recovery = Receiver::with_decode_activity(12000, 0.0, |active| {
+            if active {
+                COUNTS.with_borrow_mut(|c| c[1] += 1);
+            }
+        })
+        .unwrap();
+        slot.set_role(ReceiveRole::Slot).unwrap();
+        recovery.set_role(ReceiveRole::Recovery).unwrap();
+        for r in [&mut slot, &mut recovery] {
+            r.push(0, &vec![0.0; 162000]).unwrap();
+        }
+        COUNTS.with_borrow(|c| assert_eq!(*c, [1, 0], "only slot decoding runs at UTC +13.5"));
+        for r in [&mut slot, &mut recovery] {
+            r.push(162000, &vec![0.0; 198000]).unwrap();
+        }
+        COUNTS.with_borrow(|c| {
+            assert_eq!(
+                *c,
+                [2, 1],
+                "slot lane skips automatic recovery; recovery lane skips slot attempts"
+            )
+        });
+        assert!(slot.set_role(ReceiveRole::Combined).is_err());
+        slot.finish().unwrap();
+        recovery.finish().unwrap();
+        COUNTS.with_borrow(|c| assert_eq!(*c, [3, 2], "both contiguous tails still flush"));
     }
 
     #[test]

@@ -15,6 +15,11 @@ const path = require('node:path');
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
+      window.presentationPayload = message => {
+        let hash = 2166136261;
+        for (const c of message) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0;
+        return hash.toString(2).padStart(74, '0') + '001';
+      };
       window.testStreams = [];
       window.testEvents = [];
       const OriginalWorker = window.Worker;
@@ -62,7 +67,7 @@ const path = require('node:path');
             received_seconds: seconds, next_attempt_utc_ms: epoch + (seconds + 15) * 1000,
             decodes: messages.map(([slot, message]) => ({
               start_utc_ms: epoch + slot * 15000, end_utc_ms: epoch + slot * 15000 + 12640,
-              frequency_hz: 1200, snr_db: -12, message, payload: '0'.repeat(74) + '001',
+              frequency_hz: 1200, snr_db: -12, message, payload: presentationPayload(message),
             })),
           },
         } }));

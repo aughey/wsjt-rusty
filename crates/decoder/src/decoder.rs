@@ -87,10 +87,26 @@ pub trait AudioDecoder: Send {
     fn window_samples(&self) -> usize;
     fn hop_samples(&self) -> usize;
     fn decode(&mut self, audio: &[f32]) -> Vec<Decode>;
+    /// Optional early delivery. Results are window-relative until AudioStream adjusts them.
+    fn decode_with_observer(
+        &mut self,
+        audio: &[f32],
+        observer: &mut dyn FnMut(&Decode),
+    ) -> Vec<Decode> {
+        let results = self.decode(audio);
+        for result in &results {
+            observer(result);
+        }
+        results
+    }
+    /// Optional candidate priority, in the mode's audio-frequency convention.
+    /// Implementations must retain their normal search range and passes.
+    fn set_priority_frequencies(&mut self, _frequencies: &[f32]) {}
 }
 pub struct Ft8Decoder {
     settings: Settings,
     messages: wsjt_ft8::message::Messages,
+    priorities: Vec<f32>,
 }
 impl Ft8Decoder {
     pub fn new(settings: Settings) -> Result<Self, Box<dyn Error>> {
@@ -98,6 +114,7 @@ impl Ft8Decoder {
         Ok(Self {
             settings,
             messages: Default::default(),
+            priorities: Vec::new(),
         })
     }
 }
@@ -115,25 +132,56 @@ impl AudioDecoder for Ft8Decoder {
         15 * SAMPLE_RATE
     }
     fn decode(&mut self, audio: &[f32]) -> Vec<Decode> {
-        wsjt_ft8::decode_with_context(
+        wsjt_ft8::decode_with_context_and_observer(
             audio,
             self.settings.low_hz,
             self.settings.high_hz,
             self.settings.passes,
             &mut self.messages,
+            &self.priorities,
+            &mut |_| {},
         )
         .into_iter()
-        .map(|r| Decode {
-            mode: Mode::Ft8,
-            start_seconds: r.start_seconds as f64,
-            frequency_hz: r.frequency_hz,
-            frequency_reference: "lowest_tone",
-            snr_db: r.snr_db,
-            message: r.message,
-            payload: r.payload,
-            wspr: None,
-        })
+        .map(ft8_result)
         .collect()
+    }
+    fn decode_with_observer(
+        &mut self,
+        audio: &[f32],
+        observer: &mut dyn FnMut(&Decode),
+    ) -> Vec<Decode> {
+        wsjt_ft8::decode_with_context_and_observer(
+            audio,
+            self.settings.low_hz,
+            self.settings.high_hz,
+            self.settings.passes,
+            &mut self.messages,
+            &self.priorities,
+            &mut |r| observer(&ft8_result(r.clone())),
+        )
+        .into_iter()
+        .map(ft8_result)
+        .collect()
+    }
+    fn set_priority_frequencies(&mut self, frequencies: &[f32]) {
+        self.priorities = frequencies
+            .iter()
+            .copied()
+            .filter(|f| f.is_finite() && *f >= self.settings.low_hz && *f <= self.settings.high_hz)
+            .take(100)
+            .collect();
+    }
+}
+fn ft8_result(r: wsjt_ft8::Decode) -> Decode {
+    Decode {
+        mode: Mode::Ft8,
+        start_seconds: r.start_seconds as f64,
+        frequency_hz: r.frequency_hz,
+        frequency_reference: "lowest_tone",
+        snr_db: r.snr_db,
+        message: r.message,
+        payload: r.payload,
+        wspr: None,
     }
 }
 pub struct WsprDecoder {
@@ -229,7 +277,37 @@ impl AudioStream {
             finished: false,
         })
     }
+    pub fn set_priority_frequencies(&mut self, frequencies: &[f32]) {
+        for worker in &mut self.workers {
+            worker.decoder.set_priority_frequencies(frequencies);
+        }
+    }
     pub fn push(&mut self, samples: &[f32]) -> Result<Vec<Decode>, Box<dyn Error>> {
+        self.push_impl(samples, false, &mut |_| {}, true)
+    }
+    /// Early callbacks use stream-relative times and normal overlap deduplication.
+    /// The batch contains these same emissions, sorted, without rewriting hash text.
+    pub fn push_with_observer(
+        &mut self,
+        samples: &[f32],
+        observer: &mut dyn FnMut(&Decode),
+    ) -> Result<Vec<Decode>, Box<dyn Error>> {
+        self.push_impl(samples, true, observer, true)
+    }
+    /// Retain normal bounded/overlapping history without running automatic windows.
+    /// The caller must schedule decode_pending/finish or preserve recovery in a
+    /// separate receiver. Regular push behavior and coverage remain unchanged.
+    pub fn push_buffered(&mut self, samples: &[f32]) -> Result<(), Box<dyn Error>> {
+        self.push_impl(samples, false, &mut |_| {}, false)
+            .map(|_| ())
+    }
+    fn push_impl(
+        &mut self,
+        samples: &[f32],
+        incremental: bool,
+        observer: &mut dyn FnMut(&Decode),
+        automatic: bool,
+    ) -> Result<Vec<Decode>, Box<dyn Error>> {
         if self.finished {
             return Err("cannot push audio after finish".into());
         }
@@ -243,8 +321,9 @@ impl AudioStream {
                 worker.buffer.extend_from_slice(chunk);
                 let window = worker.decoder.window_samples();
                 while worker.buffer.len() >= window {
-                    let decoded = worker.decoder.decode(&worker.buffer[..window]);
-                    worker.collect(decoded, &mut results);
+                    if automatic {
+                        worker.decode_window(0, window, incremental, &mut results, observer);
+                    }
                     let hop = worker.decoder.hop_samples();
                     worker.buffer.drain(..hop);
                     worker.origin += hop as u64;
@@ -259,6 +338,21 @@ impl AudioStream {
     /// decoder context and deduplication with normal windows and the final flush.
     /// Workers with less than their minimum length are skipped.
     pub fn decode_pending(&mut self, maximum_samples: usize) -> Vec<Decode> {
+        self.pending_impl(maximum_samples, false, &mut |_| {})
+    }
+    pub fn decode_pending_with_observer(
+        &mut self,
+        maximum_samples: usize,
+        observer: &mut dyn FnMut(&Decode),
+    ) -> Vec<Decode> {
+        self.pending_impl(maximum_samples, true, observer)
+    }
+    fn pending_impl(
+        &mut self,
+        maximum_samples: usize,
+        incremental: bool,
+        observer: &mut dyn FnMut(&Decode),
+    ) -> Vec<Decode> {
         if self.finished {
             return Vec::new();
         }
@@ -267,8 +361,7 @@ impl AudioStream {
             let length = worker.buffer.len().min(maximum_samples);
             if length >= worker.decoder.minimum_samples() {
                 let offset = worker.buffer.len() - length;
-                let decoded = worker.decoder.decode(&worker.buffer[offset..]);
-                worker.collect_at(decoded, offset, &mut results);
+                worker.decode_window(offset, length, incremental, &mut results, observer);
             }
         }
         sort(&mut results);
@@ -277,6 +370,12 @@ impl AudioStream {
 
     /// Flush a final partial window once; repeated calls are harmless.
     pub fn finish(&mut self) -> Vec<Decode> {
+        self.finish_impl(false, &mut |_| {})
+    }
+    pub fn finish_with_observer(&mut self, observer: &mut dyn FnMut(&Decode)) -> Vec<Decode> {
+        self.finish_impl(true, observer)
+    }
+    fn finish_impl(&mut self, incremental: bool, observer: &mut dyn FnMut(&Decode)) -> Vec<Decode> {
         if self.finished {
             return Vec::new();
         }
@@ -284,8 +383,7 @@ impl AudioStream {
         let mut results = Vec::new();
         for worker in &mut self.workers {
             if worker.buffer.len() >= worker.decoder.minimum_samples() {
-                let decoded = worker.decoder.decode(&worker.buffer);
-                worker.collect(decoded, &mut results);
+                worker.decode_window(0, worker.buffer.len(), incremental, &mut results, observer);
             }
             worker.buffer.clear();
         }
@@ -294,34 +392,49 @@ impl AudioStream {
     }
 }
 impl Worker {
-    fn collect(&mut self, decoded: Vec<Decode>, output: &mut Vec<Decode>) {
-        self.collect_at(decoded, 0, output);
-    }
-    fn collect_at(&mut self, decoded: Vec<Decode>, offset: usize, output: &mut Vec<Decode>) {
+    fn decode_window(
+        &mut self,
+        offset: usize,
+        length: usize,
+        incremental: bool,
+        output: &mut Vec<Decode>,
+        observer: &mut dyn FnMut(&Decode),
+    ) {
         let retained_origin = self.origin as f64 / SAMPLE_RATE as f64;
         let origin = retained_origin + offset as f64 / SAMPLE_RATE as f64;
-        while self
-            .recent
-            .front()
-            .is_some_and(|r| r.start_seconds < retained_origin - 10.0)
-        {
-            self.recent.pop_front();
-        }
-        for mut r in decoded {
+        self.recent
+            .retain(|r| r.start_seconds >= retained_origin - 10.0);
+        let recent = &mut self.recent;
+        let mut collect = |r: &Decode| {
+            let mut r = r.clone();
             r.start_seconds += origin;
             let tolerance = if r.mode == Mode::Wspr { 2.0 } else { 0.35 };
-            if self.recent.iter().any(|old| {
+            if recent.iter().any(|old| {
                 old.payload == r.payload
                     && (old.start_seconds - r.start_seconds).abs() < tolerance
                     && (old.frequency_hz - r.frequency_hz).abs() < 4.0
             }) {
-                continue;
+                return;
             }
-            self.recent.push_back(r.clone());
+            recent.push_back(r.clone());
+            if incremental {
+                observer(&r);
+            }
             output.push(r);
+        };
+        let decoded = if incremental {
+            self.decoder
+                .decode_with_observer(&self.buffer[offset..offset + length], &mut collect)
+        } else {
+            self.decoder.decode(&self.buffer[offset..offset + length])
+        };
+        // Also accept returned results from adapters which do not notify every result.
+        for r in &decoded {
+            collect(r);
         }
     }
 }
+
 fn sort(results: &mut [Decode]) {
     results.sort_by(|a, b| {
         a.start_seconds
@@ -364,6 +477,21 @@ mod tests {
                 })
                 .collect()
         }
+    }
+    #[test]
+    fn buffered_ingestion_bounds_history_and_preserves_early_origin() {
+        let mut stream = AudioStream::new(vec![Box::new(MarkerDecoder)]).unwrap();
+        stream.push_buffered(&vec![0.0; 120 * 12000]).unwrap();
+        assert!(stream.workers[0].buffer.len() < 24000);
+        assert_eq!(stream.workers[0].origin, 119 * 12000);
+        let mut tail = vec![0.0; 12000];
+        tail[6000] = 1200.0;
+        stream.push_buffered(&tail).unwrap();
+        let decoded = stream.decode_pending(24000);
+        assert_eq!(decoded.len(), 1);
+        assert!((decoded[0].start_seconds - 120.5).abs() < 1e-10);
+        assert!(stream.finish().is_empty());
+        assert!(stream.push_buffered(&tail).is_err());
     }
     #[test]
     fn arbitrary_chunks_preserve_timestamps_and_remove_overlap_duplicates() {

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/rig",
     "crates/dsp",
     "crates/audio",
     "crates/ft8",
@@ -16,6 +17,8 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
+serialport = { version = "4.8", default-features = false }
+wsjt-rig = { path = "crates/rig" }
 leptos = { version = "0.8", features = ["csr"] }
 gloo-render = "0.3"
 gloo-timers = "0.3"
@@ -26,7 +29,7 @@ web-sys = { version = "0.3", features = [
     "AnalyserNode", "AudioContext", "AudioNode", "AudioContextState",
     "CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "MediaDevices",
     "MediaStream", "MediaStreamAudioSourceNode", "MediaStreamConstraints",
-    "MediaStreamTrack", "MediaTrackConstraints", "Navigator", "Window",
+    "MediaStreamTrack", "MediaTrackConstraints", "Navigator", "Window", "HtmlDialogElement",
 ] }
 hound = "3.5"
 libm = "0.2"

@@ -13,6 +13,7 @@ Package version, Rust edition and license are inherited from `[workspace.package
 
 | Package | Location | Responsibility |
 | --- | --- | --- |
+| `wsjt-rig` | `crates/rig` | Rust IC-718 CI-V frequency/mode/RF power control, optional native serial and RTS/DTR PTT. |
 | `wsjt-dsp` | `crates/dsp` | General windowed-sinc downsampling, independent of audio formats and protocols. |
 | `wsjt-audio` | `crates/audio` | WAV loading, channel averaging and conversion to 12 kHz using `wsjt-dsp`. |
 | `wsjt-ft8` | `crates/ft8` | FT8 receive algorithms, LDPC/CRC, 77-bit messages and waveforms. |
@@ -102,10 +103,12 @@ audio into the browser's default input (select it in browser/OS settings).
 Microphone access and AudioWorklet require localhost or HTTPS. Audio stays in
 the browser; the capture graph outputs silence to avoid speaker feedback.
 
-The FFT waterfall and waveform remain live while a dedicated worker runs the existing Rust
-`Ft8Decoder` through `AudioStream`: 100–4000 audio Hz, two passes, 30-second
-windows and 15-second hops for recovery. An additional early attempt uses the
-latest 16 seconds at **13.5 seconds into each UTC slot**, shortly after the nominal
+The FFT waterfall and waveform remain live while two dedicated WASM workers run
+the existing Rust `Ft8Decoder` through `AudioStream`: 100–4000 audio Hz and two
+passes in each lane. The slot worker handles deadline-sensitive recent-audio
+attempts; an independent recovery worker retains the full 30-second windows and
+15-second hops. A slow recovery does not serialize ahead of the next slot attempt.
+The slot attempt uses the latest 16 seconds at **13.5 seconds into each UTC slot**, shortly after the nominal
 transmission ends. Quarter-second transport chunks limit delivery delay. Results
 can arrive before the next slot when processing finishes in time; slower devices
 may still lag, and early attempts add processing work. Arbitrary capture offsets
@@ -160,9 +163,10 @@ columns on phones and up to ten on wide displays. Each tile shows only its
 callsign pair, six vertical stage indicators and a small stale/ended label.
 Received stages show their latest decoded message, including callsigns, locator,
 report or acknowledgment. Long messages truncate with full text on hover.
-Dates and explanatory text stay out of the tiles. Hover, keyboard
-focus or tap reveals received messages, inferred participants and the expected
-next response; Escape dismisses the detail panel. Hatched unheard stages,
+Dates and explanatory text stay out of the tiles. Hover or keyboard
+focus reveals received messages, inferred participants and the expected
+next response; Escape dismisses the detail panel. Clicking/tapping a tile moves
+its calling station to the station queue described below. Hatched unheard stages,
 ghosted upcoming stages and the highlighted current/next stage remain visible.
 Tile borders, tinted backgrounds and received stages follow conversation progress:
 green CQ, cyan reply, amber report, purple R-report, blue RRR, pink sign-off and
@@ -192,6 +196,82 @@ steps. RR73 occupies acknowledgment and makes a subsequent 73 optional.
 The detail panel shows actual decoded transmissions; no missing message is
 invented. A sign-off heard on one side does not prove mutual completion.
 
+Click a conversation (or press Enter/Space while focused) to move its calling
+station into **Stations to contact**. Cards in that section expand to show queue
+priority, the latest received message, SNR/audio frequency, our exchange stage,
+recent received evidence, the last CQ age, decode-arrival delay/deadline
+status and the most recent local transmit status. Other
+conversations keep their original grid cells. **Move to back** lowers a station's
+priority and cancels its active attempt; **Remove** takes it out of the queue.
+If the conversation is still retained, removing a station makes it visible on
+the conversation board again. The queue holds at most 100 unique stations.
+
+Enter your callsign/grid and choose **Transmit audio output**, then connect and
+configure the radio/PTT method. **Start contacting** prepares the selected audio
+device from the click gesture and enables the queue. It chooses the first queued
+station whose latest ordinary transmission is a fresh CQ with an upcoming
+response slot. Busy stations are skipped, so a lower-priority station can be
+called when a higher-priority one is already in another contact. Stale CQs,
+recovery decodes arriving after the response deadline and unsupported callsigns
+never initiate a call. There is no arbitrary “Transmit next slot” action.
+
+Queued stations' last-known frequencies are sent to the worker as decode
+priorities. Candidates within ±60 Hz of those frequencies are attempted first,
+in sync-strength order; the full-band search, candidate caps, both subtraction
+passes and all LDPC/CRC/OSD checks remain active. CRC-validated results are sent
+to the UI immediately when found, before the rest of the pass/band finishes.
+Late CQ results explicitly show how far they missed the response deadline.
+Priority changes apply between decoder attempts; ongoing synchronous work is
+not discarded. Keep using release WASM. These changes reduce time to a useful
+result rather than guaranteeing a particular device's total decode time.
+
+A CQ response uses the immediately following 15-second UTC slot at +0.5 s. One
+exchange runs at a time. Replies addressed from that station to our callsign
+advance locator, report, roger-report, RR73 and closing 73; subsequent transmissions
+use our alternating slots. Received SNR supplies the report automatically; each transmission uses the
+partner’s latest decoded lowest-tone audio frequency. Each unanswered stage has at most three attempts;
+an exchange stops after eight transmissions or three minutes. Exhausted attempts
+move to the back and wait for a new CQ. If the station answers someone else,
+its attempt is canceled and it waits for another CQ. Completed entries remain
+visible; **Queue again** waits for a new CQ before another attempt. Local audio
+and received evidence remain separate; a sent 73 does not prove RF delivery or
+mutual QSO completion.
+
+Queued cards show the same six received exchange stages as conversations, with
+messages, missing steps and expected progress. Stage summaries remain available
+while queued, including after the conversation board expires its entry.
+During local playback, the station card and outgoing step pulse with an amber
+glow and show the exact message being transmitted. Completed audio leaves a
+steady cyan glow and a **Sent audio** mark on each outgoing step, including
+after stopping or completing the exchange. Scheduled, canceled and failed
+attempts are not marked sent. Starting a new listening session clears these
+marks. Reduced-motion settings use a steady amber glow. These local playback
+indicators are separate from received evidence and do not confirm RF delivery.
+
+**TX audio attenuation** reduces output from 0 to 60 dB. Move the slider right
+to lower drive; it applies smoothly during playback and between transmissions.
+For example, 20 dB attenuation gives 10% of the original audio amplitude.
+Callsign, grid, audio device, attenuation and radio settings remain saved per browser/site.
+**Refresh audio outputs** requests device access when necessary; temporary
+microphone permission streams are released. Missing or inaccessible saved audio
+outputs never fall back to the main/system output. Selecting system default is
+an explicit choice. Output selection needs `AudioContext.setSinkId` support.
+The output context is resumed after the device switch completes, and reused
+while contacting remains enabled. Start contacting must be clicked again after
+an output interruption or browser autoplay block.
+
+Radio PTT is requested 500 ms before audio and must succeed before the start
+deadline. Receive is requested 200 ms after the 12.64-second frame, preserving the
+serial connection. Cancel waits for pending keying before unkey, and the existing
+30-second serial watchdog remains active. Uncheck **Use connected radio PTT**
+for externally managed keying. Radio frequency, mode and power remain operator
+settings. Keep the tab visible. **Stop contacting**, input Stop/restart, hiding
+the tab, errors and unmount disarm/cancel playback and request radio release.
+Selected stations survive capture restart with old observations cleared; reload
+clears the queue and never re-arms it. Timing is subject to the computer clock and
+uncalibrated physical-device latency. Standard base callsigns only; the receive
+decoder keeps its broader message support.
+
 After four silent 15-second slots (60 seconds since the last transmission end),
 an unfinished contact becomes **Stale**. Stale entries remain for three more
 slots (45 seconds); sign-offs remain for three slots after the last transmission
@@ -204,11 +284,12 @@ free text, telemetry and specialized contest forms are left in the raw stream
 without conversation grouping. This heuristic does not infer hidden callsigns,
 confirm a QSO, or separate simultaneous contacts between the same callsign pair.
 
-A yellow **Decoding FT8…** indicator and spinner appear while the worker is
-actually running a decode attempt, including early attempts, recovery windows
-and the final Stop flush. It retains the latest attempt's start time and shows
-when the attempt completes, even if no messages were found. Capture and display
-continue independently while decoding runs.
+A yellow decoding indicator identifies the **slot response window** and
+**background recovery** separately, including when both are running. Last slot
+and recovery durations and the last recovery lag are shown. Each lane still runs
+both passes; the recovery lane is an independent worker, rather than a tuning
+phase which must finish before the next slot can start. Capture and display
+continue while either lane works. Stop waits for both final tails.
 
 The page shows its computer clock in UTC, the first and last processed sample
 UTC times, processing lag, and up to 500 recent decodes. Each row includes UTC
@@ -227,16 +308,18 @@ joining disconnected audio under misleading timestamps. Keep the tab active;
 browser throttling, device changes and host load can interrupt live operation.
 
 An AudioWorklet copies consecutive mono PCM into quarter-second chunks, with a
-partial chunk flushed on Stop. Transport-only JavaScript connects it directly
-to the worker using a MessageChannel. Rust's shared stateful windowed-sinc
-resampler retains history and fractional phase across chunks and normalizes the
+partial chunk flushed on Stop. Transport-only JavaScript delivers it to the slot
+worker, which forwards the identical PCM to recovery through a second
+MessageChannel. Each lane retains its own continuous resampler and hash context.
+Rust's shared stateful windowed-sinc resampler retains history and fractional phase across chunks and normalizes the
 actual device rate to 12 kHz. Analyser snapshots remain visualization-only.
-The worker preserves the common decoder envelope and adds UTC in the browser
+Both lanes preserve the common decoder envelope and adds UTC in the browser
 session layer; the processing libraries remain independent of browser APIs.
 
-The worklet allows at most 60 seconds of PCM in transit, returning credits only
-after the worker processes a chunk. On overrun, it stops capture, reports the
-error and finishes the contiguous audio already delivered. It never silently
+The worklet allows at most 60 seconds of PCM in transit. A shared credit ledger
+returns a chunk credit only after **both** workers have processed it, keeping the
+same aggregate bound rather than two independent 60-second queues. On overrun,
+it stops capture, reports the error and finishes the contiguous audio already delivered. It never silently
 skips a chunk or lets the queue grow without bound. Decode speed varies by
 browser/device; sustainable real-time performance is not guaranteed on all
 hardware. Unmounting cancels the session without a final decode.
@@ -245,13 +328,13 @@ Build static assets with `trunk build --release` from `crates/web` (output:
 `crates/web/dist`). Serve all output assets together. File hashing is disabled
 because the worker imports the same generated WASM module by name; configure
 hosting to revalidate JS/WASM assets on deployment rather than cache them
-immutably. No cross-origin isolation headers or WASM threads are required.
+immutably. No cross-origin isolation headers or shared-memory WASM threads are required.
 Native workspace checks do not compile browser-only code; also run:
 
 ```sh
 cargo check -p wsjt-web --target wasm32-unknown-unknown
 cargo clippy -p wsjt-web --target wasm32-unknown-unknown -- -D warnings
-node --test crates/web/tests/capture-worklet.cjs
+node --test crates/web/tests/capture-worklet.cjs crates/web/tests/capture-runtime.cjs crates/web/tests/decoder-worker.cjs crates/web/tests/transmit-runtime.cjs
 ```
 
 The optional `crates/web/tests/conversations-browser.cjs` Playwright check runs
@@ -262,6 +345,21 @@ and run it with a Playwright installation on `NODE_PATH` and the server URL as
 its argument. Conversation unit tests also cover delayed decodes, retries,
 multiple partners, unresolved callsigns and bounded histories.
 
+The `decode-lanes-browser.cjs` regression blocks recovery for eight seconds and
+checks that two actual WASM slot CQs still arrive during the stall. It compares
+all payload/period keys with the combined receiver on the same derived input,
+preserves every original fixture payload, and checks shared credits and tail
+flushes. Node transport tests also cover both-worker startup cancellation,
+release and the aggregate 60-second bound.
+The `decode-priority-browser.cjs` check runs the independent WAV directly through
+the release WASM worker and compares all 19 payloads, first-CQ latency and event
+ordering with and without priorities.
+The `transmit-radio-browser.cjs` check additionally verifies sink-switch suspension
+recovery, CQ priority, automatic exchange replies, saved station/output settings,
+timed RTS keying, cancellation and output/connection reuse with simulated hardware. The transport tests
+cover missing devices, permission failure, late ACKs, interrupted startup and
+serialization of cancel/unkey with pending keying.
+
 Tests cover streaming resampling equivalence at 12/44.1/48 kHz, bounded filter
 history, UTC conversion, rejected discontinuities, FT8 fixture payload/message
 preservation and emission before Stop, partial transport flushes, sustained
@@ -270,6 +368,30 @@ frequency/level at device rates, silence, out-of-band rejection and automatic
 background leveling. Annotation tests cover audio-clock alignment, scrolling,
 partial captures and history/passband clipping. Browser verification uses a
 simulated microphone; physical-device latency is not calibrated.
+
+## IC-718 radio and transmitter control
+
+The Leptos receiver includes an **Icom IC-718 control** panel for serial dial
+frequency, mode, RF power and PTT. Baud, CI-V address, PTT method, frequency/preset,
+mode and RF-power entry are saved in this browser and restored after reload.
+Connect explicitly; saved values are applied only with the Set buttons.
+For a combined CI-V/PTT interface, choose
+**RTS · same CI-V port** or **DTR · same CI-V port** before connecting, according
+to your interface documentation. Match the radio's baud/address and turn CI-V
+731 mode off. Browser control needs Web Serial support on HTTPS or localhost.
+
+Legacy IC-718s use interface RTS/DTR for PTT; separate PTT ports are supported
+as well. Newer #82/#83 revisions have an explicitly selectable CAT PTT option.
+Transmit requests keying only, with a browser 30-second release/disconnect timer;
+transmit audio is supplied separately. Verify RX at the radio after release.
+RF power values are raw 0–255 settings, not watts. The radio-control panel handles
+keying; the station queue supplies FT8 audio and coordinates timed PTT through this
+same connection.
+
+The independent `wsjt-rig` crate also works outside a browser: enable its `native`
+feature for native serial control, or use its transport-independent transactions
+in another application. See [radio control notes](docs/rig.md) for native usage,
+source provenance, hardware setup, tests and limits.
 
 ## Shared decoder framework
 

@@ -1,0 +1,16 @@
+[package]
+name = "wsjt-rig"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+native = ["dep:serialport"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+serialport = { workspace = true, optional = true }
+
+[[example]]
+name = "ic718"
+required-features = ["native"]

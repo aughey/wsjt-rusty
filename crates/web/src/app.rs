@@ -145,6 +145,8 @@ struct Row {
     snr_db: f32,
     message: String,
     payload: String,
+    #[serde(default)]
+    received_at_ms: f64,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +163,11 @@ struct WorkerEvent {
     kind: String,
     error: Option<String>,
     update: Option<WorkerUpdate>,
+    decode: Option<Row>,
+    decodes: Option<Vec<Row>>,
+    attempt: Option<String>,
+    elapsed_ms: Option<f64>,
+    recovery_end_ms: Option<f64>,
 }
 
 fn utc(ms: f64) -> String {
@@ -216,6 +223,11 @@ pub fn App() -> impl IntoView {
     let (decode_activity, set_decode_activity) =
         signal("Waiting for an FT8 decode attempt".to_owned());
     let (decode_started, set_decode_started) = signal(String::new());
+    let slot_decoding = RwSignal::new(false);
+    let recovery_decoding = RwSignal::new(false);
+    let slot_duration = RwSignal::new(None::<f64>);
+    let recovery_duration = RwSignal::new(None::<f64>);
+    let recovery_lag = RwSignal::new(None::<f64>);
     let (status, set_status) =
         signal("Ready. Start listening to allow microphone access.".to_owned());
     let (rate, set_rate) = signal("—".to_owned());
@@ -224,6 +236,9 @@ pub fn App() -> impl IntoView {
     let (capture_end, set_capture_end) = signal("—".to_owned());
     let (progress, set_progress) = signal("No audio captured".to_owned());
     let (rows, set_rows) = signal(Vec::<Row>::new());
+    let radio_control = crate::radio::RadioControl::new();
+    let contact_queue = RwSignal::new(crate::contact_queue::StationQueue::default());
+    let my_call = RwSignal::new(crate::transmit_ui::saved_callsign());
     let (conversations, set_conversations) = signal(Conversations::default());
     let (hovered_contact, set_hovered_contact) = signal(None::<u64>);
     let (focused_contact, set_focused_contact) = signal(None::<u64>);
@@ -237,6 +252,64 @@ pub fn App() -> impl IntoView {
                 .cloned()
         })
     });
+    let ingest = move |incoming: Vec<Row>, processed_ms: Option<f64>| {
+        let mut fresh = Vec::new();
+        set_rows.update(|history| {
+            for mut row in incoming {
+                if history.iter().any(|old| {
+                    old.payload == row.payload
+                        && (old.start_utc_ms - row.start_utc_ms).abs() < 350.0
+                        && (old.frequency_hz - row.frequency_hz).abs() < 4.0
+                }) {
+                    continue;
+                }
+                row.received_at_ms = js_sys::Date::now();
+                fresh.push(row.clone());
+                history.push(row);
+            }
+            history.sort_by(|a, b| {
+                b.start_utc_ms
+                    .total_cmp(&a.start_utc_ms)
+                    .then(a.frequency_hz.total_cmp(&b.frequency_hz))
+            });
+            history.truncate(500);
+        });
+        fresh.sort_by(|a, b| a.start_utc_ms.total_cmp(&b.start_utc_ms));
+        let clock = processed_ms.unwrap_or_else(|| {
+            fresh
+                .iter()
+                .map(|r| r.end_utc_ms)
+                .max_by(f64::total_cmp)
+                .unwrap_or_else(|| conversations.with_untracked(|t| t.now_ms))
+        });
+        set_conversations.update(|t| {
+            t.update(
+                clock,
+                fresh.iter().map(|r| {
+                    (
+                        r.start_utc_ms,
+                        r.end_utc_ms,
+                        r.message.as_str(),
+                        r.payload.as_str(),
+                        r.snr_db,
+                    )
+                }),
+            )
+        });
+        contact_queue.update(|q| {
+            for r in &fresh {
+                q.hear(
+                    &my_call.get_untracked(),
+                    r.start_utc_ms,
+                    &r.message,
+                    &r.payload,
+                    r.snr_db,
+                    r.frequency_hz,
+                );
+                q.record_arrival(r.start_utc_ms, &r.message, r.received_at_ms);
+            }
+        });
+    };
     // Owner disposal drops the interval and cancels the clock updates.
     let _clock_timer = StoredValue::new_local(Interval::new(1000, move || {
         set_clock.set(utc(js_sys::Date::now()));
@@ -266,6 +339,26 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    let priority_monitor = StoredValue::new_local(monitor.clone());
+    let last_priorities = StoredValue::new_local((u64::MAX, Vec::<f32>::new()));
+    Effect::new(move |_| {
+        let frequencies = contact_queue.with(|q| q.priorities());
+        if !running.get() {
+            return;
+        }
+        priority_monitor.with_value(|monitor| {
+            let state = monitor.borrow();
+            if let Some(capture) = &state.capture {
+                let changed = last_priorities.with_value(|(generation, old)| {
+                    *generation != state.generation || *old != frequencies
+                });
+                if changed {
+                    capture.set_priorities(&frequencies);
+                    last_priorities.set_value((state.generation, frequencies));
+                }
+            }
+        });
+    });
     let start_monitor = monitor.clone();
     let start = move |_| {
         let Some(canvas) = canvas.get() else { return };
@@ -297,10 +390,16 @@ pub fn App() -> impl IntoView {
         let token = Rc::new(audio::Cancellation::new());
         monitor.borrow_mut().pending = Some(token.clone());
         set_decoding.set(false);
+        slot_decoding.set(false);
+        recovery_decoding.set(false);
+        slot_duration.set(None);
+        recovery_duration.set(None);
+        recovery_lag.set(None);
         set_decode_activity.set("Waiting for an FT8 decode attempt".into());
         set_decode_started.set(String::new());
         set_rows.set(Vec::new());
         set_conversations.set(Conversations::default());
+        contact_queue.update(|q| q.reset_observations());
         set_hovered_contact.set(None);
         set_focused_contact.set(None);
         set_hovered.set(None);
@@ -324,6 +423,15 @@ pub fn App() -> impl IntoView {
             if let Some(error) = event.error {
                 monitor.borrow_mut().failure = Some(error);
             }
+            if let Some(decodes) = event.decodes {
+                ingest(decodes, None);
+            }
+            if let Some(end_ms) = event.recovery_end_ms {
+                recovery_lag.set(Some(((js_sys::Date::now() - end_ms) / 1000.0).max(0.0)));
+            }
+            if let Some(decode) = event.decode {
+                ingest(vec![decode], None);
+            }
             if let Some(update) = event.update {
                 set_capture_start.set(utc(update.capture_start_ms));
                 set_capture_end.set(utc(update.capture_end_ms));
@@ -340,38 +448,40 @@ pub fn App() -> impl IntoView {
                         update.received_seconds, lag, next_attempt
                     )
                 });
-                set_conversations.update(|tracker| {
-                    tracker.update(
-                        update.capture_end_ms,
-                        update.decodes.iter().map(|row| {
-                            (
-                                row.start_utc_ms,
-                                row.end_utc_ms,
-                                row.message.as_str(),
-                                row.payload.as_str(),
-                            )
-                        }),
-                    );
-                });
-                set_rows.update(|rows| {
-                    rows.extend(update.decodes);
-                    rows.sort_by(|a, b| {
-                        b.start_utc_ms
-                            .total_cmp(&a.start_utc_ms)
-                            .then(a.frequency_hz.total_cmp(&b.frequency_hz))
-                    });
-                    rows.truncate(500);
-                });
+                ingest(update.decodes, Some(update.capture_end_ms));
             }
             match event.kind.as_str() {
-                "decode-started" => {
-                    set_decoding.set(true);
-                    set_decode_started.set(utc(js_sys::Date::now()));
-                    set_decode_activity.set("Decoding FT8…".into());
-                }
-                "decode-completed" => {
-                    set_decoding.set(false);
-                    set_decode_activity.set("FT8 decode attempt complete".into());
+                "decode-started" | "decode-completed" => {
+                    let active = event.kind == "decode-started";
+                    let recovery = event.attempt.as_deref() == Some("recovery");
+                    if recovery {
+                        recovery_decoding.set(active);
+                    } else {
+                        slot_decoding.set(active);
+                    }
+                    if active {
+                        set_decode_started.set(utc(js_sys::Date::now()));
+                    } else if let Some(ms) = event.elapsed_ms {
+                        if recovery {
+                            recovery_duration.set(Some(ms / 1000.0));
+                        } else {
+                            slot_duration.set(Some(ms / 1000.0));
+                        }
+                    }
+                    let slot = slot_decoding.get_untracked();
+                    let recovery = recovery_decoding.get_untracked();
+                    set_decoding.set(slot || recovery);
+                    set_decode_activity.set(
+                        match (slot, recovery) {
+                            (true, true) => {
+                                "Decoding FT8 · slot and recovery (independent workers)"
+                            }
+                            (true, false) => "Decoding FT8 · slot response window",
+                            (false, true) => "Decoding FT8 · background recovery",
+                            (false, false) => "FT8 decoding complete",
+                        }
+                        .into(),
+                    );
                 }
                 "flushing" => {
                     set_running.set(false);
@@ -384,6 +494,8 @@ pub fn App() -> impl IntoView {
                     set_status.set(reason);
                 }
                 "finished" | "error" => {
+                    slot_decoding.set(false);
+                    recovery_decoding.set(false);
                     set_decoding.set(false);
                     if event.kind == "error" {
                         set_decode_activity.set("FT8 decoding stopped after an error".into());
@@ -470,6 +582,7 @@ pub fn App() -> impl IntoView {
             </header>
             <h1>"FT8 receiver"</h1>
             <p class="intro">"Decode live audio from your browser’s input device."</p>
+            <crate::radio::RadioPanel control=radio_control />
             <p class="clock">"Computer clock (UTC): " {move || clock.get()}</p>
             <section class="monitor" aria-label="Audio input monitor">
                 <div class="toolbar">
@@ -491,6 +604,12 @@ pub fn App() -> impl IntoView {
                         if started.is_empty() { String::new() } else { format!("Started {started}") }
                     }}</span>
                 </div>
+                <p class="decode-timing">{move || {
+                    let slot = slot_duration.get().map(|s| format!("Last slot attempt: {s:.2} s")).unwrap_or_else(|| "Slot attempt: waiting".into());
+                    let recovery = recovery_duration.get().map(|s| format!("last recovery: {s:.2} s")).unwrap_or_else(|| "recovery: waiting".into());
+                    let lag = recovery_lag.get().map(|s| format!(" · recovery lag at last update: {s:.1} s")).unwrap_or_default();
+                    format!("{slot} · {recovery}{lag}")
+                }}</p>
                 <div class="waterfall-caption">
                     <span>{format!("{low_hz:.0}–{high_hz:.0} audio Hz · decoder passband")}</span>
                     <span>"Newest at top · 60 s history"</span>
@@ -588,6 +707,7 @@ pub fn App() -> impl IntoView {
                     <div><dt>{move || if running.get() { "Audio through (UTC)" } else { "Capture end (UTC)" }}</dt><dd>{move || capture_end.get()}</dd></div>
                 </dl>
             </section>
+            <crate::transmit_ui::StationsToContact queue=contact_queue mine=my_call radio=radio_control running=running />
             <section class="results conversation-board" aria-label="FT8 conversations">
                 <div class="toolbar"><h2>"Conversations"</h2><span class="rate">{move || format!("{} tracked", conversations.with(|t| t.items.len()))}</span></div>
                 <div class="exchange-state-legend" aria-label="Conversation colors and exchange stage appearance">
@@ -601,15 +721,16 @@ pub fn App() -> impl IntoView {
                     <span class="upcoming-key">"Ahead / optional"</span>
                     <span class="expected-key">"Next"</span>
                 </div>
+                <p>"Click a conversation to move its calling station into Stations to contact."</p>
                 <p class="empty" hidden=move || !conversations.get().items.is_empty()>"Waiting for FT8 conversations."</p>
                 <div class="conversation-list">
-                    <For each=move || conversations.with(|t| t.items.clone()) key=|contact| contact.id children=move |initial| {
+                    <For each=move || conversations.with(|t| t.items.iter().filter(|c| !contact_queue.with(|q| q.contains(&c.caller) || c.partner.as_ref().is_some_and(|p| q.contains(p)))).cloned().collect::<Vec<_>>()) key=|contact| contact.id children=move |initial| {
                         let id = initial.id;
                         let contact = Signal::derive(move || conversations.with(|t|
                             t.items.iter().find(|c| c.id == id).cloned()).unwrap_or_else(|| initial.clone()));
                         let status = Signal::derive(move || contact.get().status(conversations.with(|t| t.now_ms)));
                         view! {
-                            <article class="conversation" tabindex="0" data-conversation-id=id
+                            <article class="conversation" tabindex="0" role="button" data-conversation-id=id
                                 style=move || contact.with(|c| format!("{}--conversation-color:{};", tile_position(c.display_slot), c.color(conversations.with(|t| t.now_ms))))
                                 class:inactive=move || matches!(status.get(), "Stale" | "Sign-off heard")
                                 aria-label=move || format!("{} · {}. {}", contact.get().label(), status.get(), contact.get().expectation(conversations.with(|t| t.now_ms)))
@@ -618,33 +739,24 @@ pub fn App() -> impl IntoView {
                                 on:mouseleave=move |_| set_hovered_contact.set(None)
                                 on:focus=move |_| set_focused_contact.set(Some(id))
                                 on:blur=move |_| set_focused_contact.set(None)
-                                on:click=move |_| set_focused_contact.set(Some(id))
-                                on:keydown=move |event| { if event.key() == "Escape" { set_hovered_contact.set(None); set_focused_contact.set(None); } }>
-                                <h3>{move || contact.get().label()}</h3>
-                                <ol class="exchange-slots" aria-label="Exchange stages">
-                                    {move || contact.get().exchange_slots(conversations.with(|t| t.now_ms)).into_iter().map(|slot| {
-                                        let description = format!("{} · {}{}", slot.step.label(), slot.state.label(),
-                                            slot.evidence.as_ref().map(|e| format!(" · {} · {} received", e.latest.message, e.count)).unwrap_or_default());
-                                        let mark = match slot.state {
-                                            crate::conversations::SlotState::Received => "✓",
-                                            crate::conversations::SlotState::Missing | crate::conversations::SlotState::NotHeard => "▧",
-                                            crate::conversations::SlotState::Expected => "›",
-                                            crate::conversations::SlotState::Upcoming | crate::conversations::SlotState::Optional => "·",
-                                        };
-                                        view! {
-                                            <li class=format!("exchange-slot {}", slot.state.class()) class:current=slot.current
-                                                aria-current=slot.current.then_some("step") aria-label=description>
-                                                <span class="exchange-stage-text">
-                                                    <span class="exchange-label">{slot.step.short_label()}</span>
-                                                    {slot.evidence.map(|evidence| view! {
-                                                        <span class="exchange-message" title=evidence.latest.message.clone()>{evidence.latest.message.clone()}</span>
-                                                    })}
-                                                </span>
-                                                <span class="exchange-mark" aria-hidden="true">{mark}</span>
-                                            </li>
-                                        }
-                                    }).collect_view()}
-                                </ol>
+                                on:click=move |_| {
+                                    let c = contact.get_untracked();
+                                    let target = if c.caller == my_call.get_untracked() { c.partner.clone().unwrap_or(c.caller.clone()) } else { c.caller.clone() };
+                                    contact_queue.update(|q| {
+                                        q.add(target);
+                                        rows.with_untracked(|rows| { let mut sorted: Vec<_> = rows.iter().collect(); sorted.sort_by(|a,b| a.start_utc_ms.total_cmp(&b.start_utc_ms)); for r in sorted { q.hear(&my_call.get_untracked(), r.start_utc_ms, &r.message, &r.payload, r.snr_db, r.frequency_hz); q.record_arrival(r.start_utc_ms, &r.message, r.received_at_ms); } });
+                                    });
+                                    set_hovered_contact.set(None); set_focused_contact.set(None);
+                                }
+                                on:keydown=move |event| { if event.key() == "Enter" || event.key() == " " { event.prevent_default(); if let Some(element) = event.current_target().and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()) { element.click(); } }
+                                    if event.key() == "Escape" { set_hovered_contact.set(None); set_focused_contact.set(None); } }>
+                                <div class="conversation-header">
+                                    <h3>{move || contact.get().label()}</h3>
+                                    <span class="conversation-snr" title="Received SNR of the latest transmission">
+                                        {move || contact.with(|c| c.messages.last().map(|heard| format!("{:+.1} dB", heard.snr_db)))}
+                                    </span>
+                                </div>
+                                <crate::exchange_ui::ExchangeStages slots=Signal::derive(move || contact.get().exchange_slots(conversations.with(|t| t.now_ms))) />
                                 <span class="conversation-state">{move || match status.get() { "Stale" => "Stale", "Sign-off heard" => "Ended", _ => "" }}</span>
                             </article>
                         }
@@ -683,7 +795,7 @@ pub fn App() -> impl IntoView {
                 </div>
             </section>
             <footer>
-                <p>"Audio stays in this browser and is not played through your speakers. Uses the default audio input; localhost or HTTPS required."</p>
+                <p>"Receive audio stays in this browser. Transmit audio follows the station queue while Start contacting is enabled. Uses the default audio input; localhost or HTTPS required."</p>
                 <p>"UTC estimates use your computer’s clock and captured sample counts. Input latency is not calibrated. Transmission end = start + 12.64 s."</p>
                 <p>"FT8: 100–4000 audio Hz, two passes. Keep the tab active. Stop releases input and flushes remaining audio."</p>
             </footer>

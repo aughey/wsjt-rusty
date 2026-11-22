@@ -4,7 +4,7 @@ export function cancelCapture(token) { token.aborted = true; token.abort?.(); }
 
 export async function openCapture(onEvent, token) {
   const context = new AudioContext();
-  let stream, source, node, worker;
+  let stream, source, node, worker, recoveryWorker;
   let closed = false;
   let stopping = false;
   let resolveDone;
@@ -25,6 +25,7 @@ export async function openCapture(onEvent, token) {
     cancelReady?.(new Error('Capture cancelled.'));
     releaseInput();
     worker?.terminate();
+    recoveryWorker?.terminate();
     resolveDone();
   };
   token.abort = abort;
@@ -58,31 +59,49 @@ export async function openCapture(onEvent, token) {
     source = context.createMediaStreamSource(stream);
     source.connect(analyser);
     node = new AudioWorkletNode(context, 'wsjt-capture', { channelCount: 1, channelCountMode: 'explicit', outputChannelCount: [1] });
+    recoveryWorker = new Worker(new URL('decoder-worker.js', document.baseURI), { type: 'module' });
     worker = new Worker(new URL('decoder-worker.js', document.baseURI), { type: 'module' });
     const channel = new MessageChannel();
+    const recoveryChannel = new MessageChannel();
     const epoch = Date.now() - context.currentTime * 1000;
     let readyResolve, readyReject;
+    let slotReady = false, recoveryReady = false;
+    let slotFinished = null, recoveryFinished = null;
     const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
     cancelReady = readyReject;
     const timeout = setTimeout(() => readyReject(new Error('Decoder worker startup timed out.')), 30000);
-    worker.onerror = event => {
+    const workerError = event => {
       const error = event.message || 'Decoder worker failed.';
-      readyReject(new Error(error));
-      emit({ kind: 'error', error });
+      readyReject(new Error(error)); emit({ kind: 'error', error }); abort();
+    };
+    worker.onerror = recoveryWorker.onerror = workerError;
+    function finishIfReady() {
+      if (!slotFinished || !recoveryFinished) return;
+      const update = slotFinished.update;
+      if (update && recoveryFinished.update) update.decodes.push(...recoveryFinished.update.decodes);
+      emit({ kind: 'finished', update, error: slotFinished.error || recoveryFinished.error || null });
       abort();
-    };
-    worker.onmessage = ({ data }) => {
-      if (data.kind === 'ready') { readyResolve(); return; }
-      if (data.kind === 'error') {
-        readyReject(new Error(data.error));
-        emit(data);
-        abort();
-      } else if (data.kind === 'finished') {
-        emit(data);
-        abort();
+    }
+    function message(data, recovery) {
+      if (closed) return;
+      if (data.kind === 'ready') {
+        if (recovery) recoveryReady = true; else slotReady = true;
+        if (slotReady && recoveryReady) readyResolve();
+        return;
+      }
+      if (data.kind === 'error') { readyReject(new Error(data.error)); emit(data); abort(); return; }
+      if (data.kind === 'finished') {
+        if (recovery) recoveryFinished = data; else slotFinished = data;
+        finishIfReady(); return;
+      }
+      if (recovery && data.kind === 'update') {
+        emit({ kind: 'recovery-results', decodes: data.update.decodes, recovery_end_ms: data.update.capture_end_ms });
       } else { emit(data); }
-    };
-    worker.postMessage({ rate: context.sampleRate, epoch, port: channel.port1 }, [channel.port1]);
+    }
+    worker.onmessage = ({data}) => message(data, false);
+    recoveryWorker.onmessage = ({data}) => message(data, true);
+    recoveryWorker.postMessage({ role: 'recovery', rate: context.sampleRate, epoch, port: recoveryChannel.port1 }, [recoveryChannel.port1]);
+    worker.postMessage({ role: 'slot', rate: context.sampleRate, epoch, port: channel.port1, recoveryPort: recoveryChannel.port2 }, [channel.port1, recoveryChannel.port2]);
     try { await ready; } finally { clearTimeout(timeout); }
     checkCancelled();
     node.port.onmessage = ({ data }) => {
@@ -114,7 +133,7 @@ export async function openCapture(onEvent, token) {
     source.connect(node);
     // The processor outputs silence. Connecting it keeps capture rendering live.
     node.connect(context.destination);
-    return { analyser, sampleRate: context.sampleRate, audioTimeMs: () => epoch + context.currentTime * 1000, stop, abort };
+    return { setPriorities: frequencies => { const message = { kind: 'priorities', frequencies: Array.from(frequencies) }; worker.postMessage(message); recoveryWorker.postMessage(message); }, analyser, sampleRate: context.sampleRate, audioTimeMs: () => epoch + context.currentTime * 1000, stop, abort };
   } catch (error) {
     abort();
     throw error;
@@ -126,3 +145,5 @@ export function captureRate(capture) { return capture.sampleRate; }
 export function captureTime(capture) { return capture.audioTimeMs(); }
 export function stopCapture(capture) { return capture.stop(); }
 export function abortCapture(capture) { capture.abort(); }
+
+export function captureSetPriorities(capture, frequencies) { capture.setPriorities(frequencies); }

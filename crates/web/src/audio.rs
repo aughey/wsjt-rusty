@@ -14,6 +14,8 @@ extern "C" {
     fn cancel_capture(token: &JsValue);
     #[wasm_bindgen(js_name = captureAnalyser)]
     fn capture_analyser(capture: &JsValue) -> AnalyserNode;
+    #[wasm_bindgen(js_name = captureSetPriorities)]
+    fn capture_set_priorities(capture: &JsValue, frequencies: &[f32]);
     #[wasm_bindgen(js_name = captureRate)]
     fn capture_rate(capture: &JsValue) -> f32;
     #[wasm_bindgen(js_name = captureTime)]
@@ -55,6 +57,10 @@ impl Capture {
             handle,
             _callback: callback,
         })
+    }
+
+    pub fn set_priorities(&self, frequencies: &[f32]) {
+        capture_set_priorities(&self.handle, frequencies);
     }
 
     pub fn sample_rate(&self) -> f32 {

@@ -6,6 +6,7 @@ pub mod ldpc;
 pub mod message;
 mod message_tables;
 mod tables;
+pub mod transmit;
 pub mod waveform;
 
 use message::Messages;
@@ -234,12 +235,45 @@ pub fn decode_with_context(
     passes: usize,
     messages: &mut Messages,
 ) -> Vec<Decode> {
+    decode_with_context_and_observer(audio, low, high, passes, messages, &[], &mut |_| {})
+}
+
+/// Notify validated results as found, before remaining candidates/passes finish.
+/// Priority frequencies only reorder candidates; all candidates and passes remain.
+/// Observer text reflects hash context at emission, and is never rewritten.
+pub fn decode_with_context_and_observer(
+    audio: &[f32],
+    low: f32,
+    high: f32,
+    passes: usize,
+    messages: &mut Messages,
+    priority_frequencies: &[f32],
+    observer: &mut dyn FnMut(&Decode),
+) -> Vec<Decode> {
+    let mut reported: Vec<Decode> = Vec::new();
     let mut residual = audio.to_vec();
     let mut results: Vec<Decode> = Vec::new();
     let mut subtractor = crate::waveform::Subtractor::default();
     for pass in 0..passes {
         eprintln!("Decode pass {} of {}", pass + 1, passes);
-        let found = decode_once(&residual, low, high, messages);
+        let found = decode_once(
+            &residual,
+            low,
+            high,
+            messages,
+            priority_frequencies,
+            &mut |result| {
+                if reported.iter().any(|r| {
+                    r.payload == result.payload
+                        && (r.start_seconds - result.start_seconds).abs() < 0.3
+                        && (r.frequency_hz - result.frequency_hz).abs() < 6.0
+                }) {
+                    return;
+                }
+                observer(result);
+                reported.push(result.clone());
+            },
+        );
         let mut added = 0;
         for result in found {
             if results.iter().any(|r| {
@@ -292,9 +326,38 @@ pub fn decode_with_context(
     results
 }
 
-fn decode_once(audio: &[f32], low: f32, high: f32, messages: &mut Messages) -> Vec<Decode> {
+fn decode_once(
+    audio: &[f32],
+    low: f32,
+    high: f32,
+    messages: &mut Messages,
+    priorities: &[f32],
+    observer: &mut dyn FnMut(&Decode),
+) -> Vec<Decode> {
     let mut planner = FftPlanner::<f32>::new();
-    let candidates = candidates(audio, low, high, &mut planner);
+    let mut candidates = candidates(audio, low, high, &mut planner);
+    if !priorities.is_empty() {
+        let mut ordered: Vec<_> = candidates
+            .into_iter()
+            .map(|c| {
+                let priority = priorities
+                    .iter()
+                    .any(|&f| f.is_finite() && (f - c.frequency).abs() <= 60.0);
+                (priority, c)
+            })
+            .collect();
+        // Stable ordering keeps the existing time order outside priority regions.
+        ordered.sort_by(|(pa, a), (pb, b)| {
+            pb.cmp(pa).then_with(|| {
+                if *pa {
+                    b.sync.total_cmp(&a.sync)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        });
+        candidates = ordered.into_iter().map(|(_, c)| c).collect();
+    }
     eprintln!("Searching {} Costas candidates", candidates.len());
     let mut results: Vec<Decode> = Vec::new();
     let mut cached_second = isize::MIN;
@@ -421,13 +484,15 @@ fn decode_once(audio: &[f32], low: f32, high: f32, messages: &mut Messages) -> V
                 continue;
             }
             let snr = snr.max(-25.0);
-            results.push(Decode {
+            let result = Decode {
                 start_seconds: time,
                 frequency_hz: frequency,
                 snr_db: snr,
                 message,
                 payload: payload.iter().map(|&b| char::from(b'0' + b)).collect(),
-            });
+            };
+            observer(&result);
+            results.push(result);
             break;
         }
     }
