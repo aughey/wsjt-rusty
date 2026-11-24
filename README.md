@@ -53,6 +53,9 @@ Click a **Conversations** card, or focus it and press Enter/Space, to put its ca
 at the front of the waiting queue. **Add all CQ stations** and the optional
 **Automatically add new CQ stations** help build a calling list; they exclude
 previously completed contacts, your own station, and stale or busy conversations.
+On **Conversations**, save an exclusion interval based on the persistent local log:
+**Always**, a number of days (for example, 7 to recontact after a week), or **Off**.
+Manual card selection overrides this exclusion.
 Adding a station does not start transmitting.
 
 ![Stations to contact with the live waterfall, world map, and queued station cards](docs/screenshots/stations.png)
@@ -82,7 +85,9 @@ messages remain separate: local playback does not prove RF delivery or mutual QS
 completion.
 
 Saved queue priorities combine **CQ first**, **strongest signal**, and **nearest
-distance** each 15-second cycle. The active exchange stays first. Move waiting
+distance** each 15-second cycle. Until a partner report is received, contact is an
+attempt: a fresh CQ selected by queue priority can replace it. Received partner
+reports establish a QSO, which stays first until it ends. Move waiting
 stations to the front or back, remove one, or **Remove all** to clear and disarm
 the queue. Moving the active station to the back or removing it cancels its attempt.
 Waiting stations expire after a saved CQ timeout (180 seconds by default). Initial
@@ -124,6 +129,9 @@ local data. There is no log synchronization, callsign lookup, or spot upload.
 See the [browser guide](docs/browser.md) for operating details and the
 [contact-log notes](docs/contact-log.md) for persistence and export semantics.
 
+Conversation interpretation is also available as the independent, zero-dependency
+[`ft8-conversations` crate](crates/conversations/README.md).
+
 ## Run the browser app locally
 
 ```sh
@@ -132,6 +140,9 @@ cargo install trunk --locked
 cd crates/web
 trunk serve --release --open
 ```
+
+The local server rebuilds edits without reloading an active listening session.
+Stop listening/contacting, then refresh the browser to load the updated app.
 
 Open `http://localhost:8080`. Use release WASM for live operation. Static hosting
 uses `trunk build --release`; serve the complete `crates/web/dist` directory,
@@ -163,6 +174,7 @@ cargo run --release -- --mode wspr --min-hz 1390 --max-hz 1610 recording.wav
 | `--passes N` | 1–4 decode/subtraction passes; defaults: FT8 2, WSPR 3. |
 | `--min-hz F --max-hz F` | Custom search bounds for a single selected mode. |
 | `--stdin` | Read raw PCM16LE, mono, **12000 Hz**, until EOF instead of a WAV path. |
+| `--realtime` | With `--stdin` and FT8, buffer audio and decode the latest 16 seconds at each UTC slot + 13.5 s. |
 
 FT8 defaults to 100–4000 audio Hz. WSPR defaults to 1390–1610 Hz, matching
 WSJT-X's normal 1500 Hz center and ±110 Hz search. WSPR searches one subband up
@@ -179,6 +191,9 @@ To feed an existing PCM producer:
 
 ```sh
 pcm_producer | target/release/wsjt-rusty --mode all --stdin --json
+
+# Live 12 kHz FT8. Decodes the latest 16 seconds at each UTC slot + 13.5 s.
+pcm_producer | target/release/wsjt-rusty --stdin --realtime
 ```
 
 The producer must provide headerless signed 16-bit little-endian mono samples
@@ -187,6 +202,13 @@ to the raw PCM input. Decoding is synchronous: the consumer provides
 backpressure, and an upstream live-capture system must buffer audio accordingly.
 The decoder flushes a final partial window at EOF. The CLI does not capture
 sound-card audio directly; no network server is implemented.
+
+`--realtime` is FT8 stdin only. It keeps the audio in the stream buffer and,
+when the system clock reaches each UTC slot plus 13.5 seconds, decodes the
+latest 16 seconds. Printed start times stay relative to the first sample. The
+attempt is checked when the next PCM chunk arrives, and the decode blocks
+further reads, so the producer has to buffer live audio across that work. This
+mode does not run the automatic 30-second recovery windows.
 
 ## Rust port and libraries
 

@@ -51,6 +51,29 @@ test('Stop waits for both tails, merges results, and releases both workers and i
   assert.deepEqual(events.at(-1).update.decodes.map(d=>d.payload),['slot','recovery']);
   assert.ok(s.workers.every(w=>w.terminated));assert.equal(s.contexts[0].state,'closed');
 });
+
+test('completed audio state transitions do not stop a running receive clock',async()=>{
+  const api=await apiPromise, s=setup(), events=[];
+  const capture=await api.openCapture(json=>events.push(JSON.parse(json)),api.createCancellation());
+  // Queued statechange notifications must consult the current state, not stop
+  // a context that is already running again.
+  s.contexts[0].onstatechange();
+  assert.equal(s.tracks[0].stopped,false);
+  assert.equal(events.length,0);
+  api.abortCapture(capture);
+});
+
+test('a real audio-clock suspension still releases input and flushes both lanes',async()=>{
+  const api=await apiPromise, s=setup(), events=[];
+  const capture=await api.openCapture(json=>events.push(JSON.parse(json)),api.createCancellation());
+  s.contexts[0].state='suspended';
+  s.contexts[0].onstatechange();
+  assert.match(events[0].error,/clock suspended/i);
+  assert.equal(s.tracks[0].stopped,true);
+  for(const worker of s.workers)worker.emit({kind:'finished',update:{decodes:[]}});
+  await api.stopCapture(capture);
+  assert.ok(s.workers.every(w=>w.terminated));
+});
 test('permission cancellation releases a late stream; startup cancellation terminates both workers',async()=>{
   const api=await apiPromise;let grant;
   const s=setup({permission:()=>new Promise(resolve=>grant=resolve)}), token=api.createCancellation();

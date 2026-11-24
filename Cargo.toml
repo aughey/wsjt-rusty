@@ -9,6 +9,7 @@ members = [
     "crates/decoder",
     "crates/cli",
     "crates/web",
+    "crates/conversations",
 ]
 
 [workspace.package]
@@ -31,6 +32,8 @@ web-sys = { version = "0.3", features = [
     "MediaStream", "MediaStreamAudioSourceNode", "MediaStreamConstraints",
     "MediaStreamTrack", "MediaTrackConstraints", "Navigator", "Window", "HtmlDialogElement",
 ] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 hound = "3.5"
 libm = "0.2"
 rustfft = "6.2"
@@ -41,3 +44,4 @@ wsjt-audio = { path = "crates/audio" }
 wsjt-ft8 = { path = "crates/ft8" }
 wsjt-wspr = { path = "crates/wspr" }
 wsjt-rusty = { path = "crates/decoder" }
+ft8-conversations = { path = "crates/conversations" }

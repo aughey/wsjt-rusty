@@ -53,6 +53,21 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
   operator and PTT transactions per port; close on failure before queued reuse.
   Persist radio configuration/form values per site, validate restored values, and
   report storage failures. Restoration must not connect, issue commands or key TX.
+- `ft8-conversations` (`crates/conversations`): standalone receive-only FT8 conversation
+  interpretation and payload-aware message classification. Standard library only; no
+  dependencies or dev-dependencies. `Conversations` is the entry point. Retain decoded
+  grid text here; coordinates, distance sorting and colors stay in the web adapter.
+  `Conversation::decision()` in `src/decision.rs` returns received-stage flags and
+  the expected next step/sender/recipient without local station identity or timing.
+  `manager::decide` owns slot turns, receive-readiness, retry/attempt limits and
+  selection; `session::Contact` consumes validated partner evidence using decision().
+  Keep device scheduling, PCM, PTT and TX authorization external; missing stages are not
+  received evidence and RR73 makes closing 73 optional.
+  `select_active_conversation` in `src/manager.rs` selects the first eligible CQ
+  from a priority-ordered slice when no exchange is active. Require the preceding
+  slot and a CQ frame end within five seconds of the intended TX boundary; decode
+  arrival never refreshes CQ age. Selection is pure and does not consume a CQ.
+  See `crates/conversations/README.md` for independent build/test commands.
 - `wsjt-dsp` (`crates/dsp`): reusable signal processing, currently windowed-sinc
   downsampling to any equal or lower nonzero sample rate, with batch and stateful
   streaming APIs. No protocol or file I/O dependencies.
@@ -141,7 +156,7 @@ PCM16LE stdin -> CLI conversion to normalized mono f32 -------+
 | `crates/web/src/spectrum.rs`, `crates/web/src/waterfall.rs` | RustFFT/Hann visualization, automatic background leveling, yellow-highlight color palette and bounded scrolling canvas. Display processing never modifies decoder PCM. |
 | `crates/web/src/annotations.rs` | Nominal FT8 time/frequency rectangles, clipped to the passband and captured history using FFT row-center timestamps. |
 | `crates/web/src/contact_queue.rs`, `crates/web/src/transmit_ui.rs` | Bounded CQ-triggered station priority queue, exchange progression, saved settings and operator arm/stop controls. |
-| `crates/web/src/conversations.rs` | Receive-only conversation estimates, callsign-pair grouping, observed evidence, inferred participants and bounded audio-clock stale/sign-off retention. Independent of decoder DSP. |
+| `crates/web/src/conversations.rs` | Browser adapter over `ft8-conversations`: coordinates, colors and card sorting. Conversation interpretation and regressions live in `crates/conversations`. |
 | `crates/web/src/message_kind.rs` | Presentation-only message classification, colors and icons. Classification is not QSO tracking or a replacement for protocol message unpacking. |
 | `crates/decoder/tests/decoder.rs` | FT8, error-correction, waveform and partial-frame regressions. |
 | `crates/audio/tests/read.rs` | WAV channel averaging and resampling/alias rejection regression. |
@@ -171,6 +186,9 @@ algorithms through one generic implementation merely to reduce duplication.
   stream adds origins and deduplicates before notifying. Keep batch APIs working.
   Priority frequencies only reorder retained FT8 candidates, keeping the complete
   passband, candidate caps, metrics, error correction and all subtraction passes.
+  Priority sync ordering revisits candidate-start seconds: retain the bounded
+  per-pass 32-spectrum LRU cache so a crowded queue does not recompute a large
+  FFT per candidate. Unprioritized time ordering retains one spectrum.
 - Adapter results contain start times relative to the current window. Only
   `AudioStream` adds the recording/stream origin. Do not add it twice.
 - `Decode.start_seconds` is `f64`, relative to the first input sample, not UTC.
@@ -291,10 +309,17 @@ lag separately, keeping primary capture progress independent of recovery lag.
 ### Browser transmit audio
 
 Clicking or keyboard-activating a conversation moves its calling station into
-`transmit_ui.rs`'s expanded Stations to contact queue. `contact_queue.rs` owns the
-bounded state machine: 100 unique stations, 12 evidence messages each, FIFO among
+`transmit_ui.rs`'s expanded Stations to contact queue. The zero-dependency
+`ft8-conversations` manager owns contact decisions; `contact_queue.rs` executes them
+and owns bounded queue/log/resource state: 100 unique stations, 12 evidence messages each, FIFO among
 eligible fresh CQs, one active exchange. A station in another contact must wait
-for a fresh CQ. Never roll a stale CQ forward to a later slot. Initial calls use
+for a fresh CQ. Never roll a stale CQ forward to a later slot.
+An exchange remains an attempt until a validated partner report or later-stage
+message is received. Before then, fresh CQs may replace it in queue priority
+order after successful initial audio; local audio and partner locator replies
+do not earn exclusive priority. Keep the replaced station queued and archive its
+attempt log. Only established QSOs are pinned ahead of queue sorting.
+Initial calls use
 the immediately following UTC slot, replies advance only on ordinary payloads
 addressed from the partner to our station. Allow four initial-call transmissions
 without a response, then end the active attempt and move the station to the back
@@ -492,3 +517,48 @@ sorting, expiry checks and auto-add run across all application pages. Shared lis
 writes survive tab changes. Log persistence/history loading is a session service,
 independent of whether its table is visible. Preserve accessible tab keyboard
 navigation (arrows/Home/End), selection and panel labeling.
+
+
+### Contact state transitions
+
+`crates/conversations/src/session.rs` owns the `QsoState`/partner-evidence progression;
+`crates/conversations/src/manager.rs::decide` owns selection, slot turns,
+receive-completion gates and attempt budgets; the web `transmit.rs` re-exports
+these types.
+`contact_queue.rs` executes typed Listen/Start/Transmit/End decisions and derives `ContactingState` from the enabled session, active
+exchange and pending reservation. Numeric step indices are for presentation and
+sent-history slots only. Process valid delayed partner evidence independently
+of latest-card timestamps; never regress RX progress or advance it from local
+playback. Before audio starts, revoke reservations whose outgoing stage has
+become obsolete, cancel/unkey the transport, then replan after release. Stale
+plan callbacks cannot affect history or retry counts. Started frames finish
+without rolling RX state back. Leave the last permitted transmission's receive
+window open before retry exhaustion. Keep exhaustive state/event coverage and
+queue timing regressions; see `docs/browser.md` for the event and slot guards.
+
+Clock-driven contact limits use `StationQueue::advance_time` before radio/output
+readiness gates, as well as inside `plan`. Four unanswered initial calls are
+counted from successful transmissions in the active Calling state; repeated CQs
+cannot reset that budget. Show the current attempt's calls out of four separately
+from cumulative initial-call audio while queued. Keep the last reply window and
+three-minute sorting penalty; the penalty is not a transmit prohibition when no
+other caller is eligible.
+
+Accepted RRR/RR73 commits an owed closing 73: partner CQ/other-recipient traffic
+must not cancel it. Preserve explicit Stop/error/attempt-limit cancellation.
+Before acknowledgment, partner-abandonment events must be in a strictly newer
+partner RX slot, not merely have a later fine-sync timestamp. Queue stage cards
+prefer the local station/target pair once an attempt exists. Keep end reasons
+on inactive cards and logs, including capture interruption status; never leave
+“awaiting response” on an ended attempt or hide discontinuities by resuming TX.
+
+Browser transmit retries require the slot receiver's completed UTC-slot watermark,
+not elapsed capture time or recovery completion. A new addressed response can
+select the next reply before full-band completion; never reserve a blind stale
+retry while the required receive slot remains unresolved. Revoke obsolete PCM
+reactively and revalidate authorization before PTT and after its ACK. Match the
+full outgoing message/frequency, not just its phase index. Superseded audio must
+unkey without disarming or counting as sent. Self-decoded TX stays raw RX evidence
+but cannot control a partner or overwrite its signal measurements. Preserve first
+RX decode-arrival times separately from frame times. Keep the browser scheduler
+regression that independently decodes played PCM and cancels between timer ticks.

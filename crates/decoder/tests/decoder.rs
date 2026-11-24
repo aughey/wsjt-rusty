@@ -178,6 +178,20 @@ fn prioritized_incremental_decode_preserves_the_full_recorded_payload_set() {
     assert_eq!(payloads(&result), payloads(&baseline));
     assert_eq!(payloads(&emitted), payloads(&result));
     assert_eq!(result.len(), baseline.len());
+    // A full station queue can prioritize the whole band, scattering start
+    // seconds in strongest-sync order. Preserve the independent payload set.
+    let priorities: Vec<_> = (0..100).map(|i| 100.0 + i as f32 * 39.0).collect();
+    let crowded = ft8::decode_with_context_and_observer(
+        &samples,
+        100.0,
+        4000.0,
+        2,
+        &mut Default::default(),
+        &priorities,
+        &mut |_| {},
+    );
+    assert_eq!(payloads(&crowded), payloads(&baseline));
+    assert_eq!(crowded.len(), baseline.len());
     eprintln!(
         "First prioritized CQ: {:?}; all {} recorded messages: {:?}",
         first.unwrap(),

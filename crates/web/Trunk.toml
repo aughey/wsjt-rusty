@@ -7,3 +7,6 @@ filehash = false
 [serve]
 addresses = ["127.0.0.1"]
 port = 8080
+# Rebuilds must not reload an on-air session and silently reset listening/PTT.
+# Refresh explicitly after stopping input/contacting to load a new build.
+no_autoreload = true

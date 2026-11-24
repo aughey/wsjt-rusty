@@ -5,6 +5,16 @@ use std::sync::Arc;
 pub const FFT_SIZE: usize = 16384;
 pub const DISPLAY_RANGE_DB: f32 = 50.0;
 
+/// Absolute time-domain peak, independent of FFT normalization and passband.
+pub fn input_peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite())
+        .map(f32::abs)
+        .fold(0.0, f32::max)
+}
+
 /// Robust display leveling: signals occupying a minority of the passband do
 /// not set the background. Reuses its scratch space; never alters decoder PCM.
 #[derive(Default)]
@@ -140,6 +150,15 @@ pub fn color(db: f32, floor: f32) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_peak_includes_negative_full_scale_samples_without_fft_scaling() {
+        assert_eq!(input_peak(&[]), 0.0);
+        assert_eq!(input_peak(&[0.0; 16]), 0.0);
+        assert_eq!(input_peak(&[0.1, -0.75, 0.5, f32::NAN]), 0.75);
+        assert_eq!(input_peak(&[-1.0, 0.1]), 1.0);
+        assert_eq!(input_peak(&[1.25]), 1.25);
+    }
 
     #[test]
     fn automatic_floor_follows_background_without_being_set_by_narrow_signals() {

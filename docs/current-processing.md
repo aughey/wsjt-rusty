@@ -353,7 +353,7 @@ through ordinary updates and neighboring expiry; explicit sorts reassign cells.
 
 [`contact_queue.rs`](../crates/web/src/contact_queue.rs), `StationQueue`, is
 separate state from the receive-only board. Selecting a conversation queues its
-caller; it does not transfer ownership of the conversation or start audio.
+caller and imports its bounded received history/stage summaries; it does not start audio.
 The queue retains up to 100 stations, 12 received evidence messages per station,
 and its own bounded `Conversations` tracker for both-direction stage display.
 That tracker is fed for relevant queued calls independently of board expiry.
@@ -364,9 +364,16 @@ and the active exchange. Only appropriate ordinary replies addressed from the
 partner to our callsign advance that exchange. Late recovery can fill evidence
 and recent archived contact logs without automatically qualifying as a fresh CQ.
 
-`transmit_ui.rs` uses a main-thread 100 ms interval while Stations is visible to
+`transmit_ui.rs` uses a main-thread 100 ms interval across application pages to
 check playback, queue plans, and armed transmit scheduling; per-second checks
 handle sorting/expiry. This timer is distinct from receive decode scheduling.
+The zero-dependency [`manager::decide`](../crates/conversations/src/manager.rs)
+returns Listen/Start/Transmit/End; [`session::Contact`](../crates/conversations/src/session.rs)
+uses the shared conversation decision to progress validated partner evidence.
+Selection, slot turns, receive-readiness gates and attempt budgets live there.
+The web queue stores facts and executes the policy, revalidating reserved messages
+before keying and after PTT acknowledgment. The Stations view shows that decision
+and separates active from waiting conversations.
 Audio generation, output, and serialized radio/PTT control are separate paths.
 Durable attempt/evidence writes use a separate contact-log worker and IndexedDB,
 as described in [`contact-log.md`](contact-log.md); it is not another PCM stage.
@@ -415,7 +422,11 @@ correlation, and network/browser transports are outside those headless libraries
 The CLI in [`main.rs`](../crates/cli/src/main.rs) normalizes WAV input through
 `wsjt-audio`, or converts mono 12 kHz PCM16LE stdin, then calls `AudioStream` and
 prints text/JSONL results. Multiple configured modes have separate retained
-windows but are called sequentially by `AudioStream`. CLI/library WSPR has its
+windows but are called sequentially by `AudioStream`. `--realtime` is FT8 stdin
+only: it uses `push_buffered` and, at each system-clock UTC slot + 13.5 s, calls
+`decode_pending_with_observer` on the latest 16 seconds. Those attempts do not
+run the automatic 30-second windows; EOF still flushes the retained tail.
+CLI/library WSPR has its
 own adapter/context and 108-second minimum, 132-second window, and 16-second hop;
 the browser receiver currently constructs FT8 only.
 

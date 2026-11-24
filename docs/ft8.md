@@ -30,6 +30,11 @@ filter come from WSJT-X. Algorithm changes for this offline application:
   normalization and QSO-frequency prioritization.
 - Cache a 16-second FFT of a zero-padded 15-second buffer per candidate-start
   second; downconvert to 200 complex samples/second using the original filter.
+  Time-ordered decoding retains one spectrum. Priority/sync ordering retains
+  up to 32 spectra with least-recently-used eviction (about 47 MiB), scoped to
+  one subtraction pass. This covers candidate-start seconds in a 30-second live
+  window without recomputing a large FFT each time priorities revisit a second.
+  Longer batch recordings retain the same bounded cache. FFT scratch is reused.
 - Use Rust's `tanh`/`atanh` with finite saturation for belief propagation.
   The fallback uses a bit-packed most-reliable basis and order-two patterns
   with the depth-2 parity screening rule. It retains CRC validation of only the
@@ -49,6 +54,8 @@ documented in the main README. No FT8 algorithm or upstream source bytes changed
 for browser integration. The browser additionally schedules a non-consuming
 attempt on the latest 16 seconds at UTC slot +13.5 seconds, sharing the same
 message context and overlap deduplication as the regular recovery windows.
+The CLI `--realtime` option uses that same 16-second UTC-slot attempt for FT8
+stdin and does not run a parallel recovery window.
 This assumes an approximately synchronized computer/radio clock for early
 results; off-clock signals still have the original 30-second recovery windows.
 No sensitivity or real-time completion guarantee is implied by the early attempt.
@@ -130,6 +137,11 @@ The independent fixture regression compares all 19 payloads between default and
 prioritized decoding and checks that the queued CQ is observed first. The WASM
 browser regression checks immediate delivery before decode-completed, full-band
 payload preservation, automatic tone matching and queue use of early results.
+Both regressions also check 100 priority frequencies across the passband. A
+cache regression checks reordered seconds against independently constructed
+zero-padded FFT inputs, one transform per retained second, and bounded eviction.
+Candidate ordering, caps, both passes and all decoding checks are unchanged;
+this is a Rust-side cache optimization, not a change to upstream source bytes.
 This does not establish full WSJT-X sensitivity or physical timing parity.
 
 The browser owns a CQ-triggered station queue (`contact_queue.rs`), separate from

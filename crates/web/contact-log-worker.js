@@ -36,7 +36,7 @@ function records(db, offset, limit) {
 }
 function summary(db, offset = 0) {
     return {records:records(db,offset,25), total:rows(db,'SELECT count(*) AS n FROM contacts')[0].n,
-        contacted:rows(db,"SELECT DISTINCT target FROM contacts WHERE outcome='Completed'").map(r=>r.target)};
+        contacted:rows(db,"SELECT target, MAX(json_extract(body, '$.end_ms')) AS end_ms FROM contacts WHERE outcome='Completed' GROUP BY target")};
 }
 async function execute(request) {
     const [SQL, store] = await Promise.all([sqlReady,storage()]);

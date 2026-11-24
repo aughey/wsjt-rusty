@@ -1,5 +1,8 @@
 //! Tabbed, paginated local log. Database writes are acknowledged only after commit.
-use crate::{contact_log::ContactRecord, contact_queue::StationQueue};
+use crate::{
+    contact_log::{CompletedContact, ContactRecord},
+    contact_queue::StationQueue,
+};
 use leptos::prelude::*;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -7,6 +10,10 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 #[wasm_bindgen(module = "/src/contact-log-runtime.js")]
 extern "C" {
+    #[wasm_bindgen(js_name = loadContactExclusion)]
+    fn load_exclusion() -> String;
+    #[wasm_bindgen(js_name = saveContactExclusion)]
+    fn save_exclusion(json: &str) -> String;
     #[wasm_bindgen(js_name = listContacts)]
     fn list_contacts(offset: usize) -> js_sys::Promise;
     #[wasm_bindgen(js_name = saveContacts)]
@@ -21,7 +28,7 @@ extern "C" {
 struct Page {
     records: Vec<ContactRecord>,
     total: usize,
-    contacted: Vec<String>,
+    contacted: Vec<CompletedContact>,
 }
 fn parse(value: JsValue) -> Result<Page, String> {
     serde_json::from_str(&value.as_string().unwrap_or_default()).map_err(|e| e.to_string())
@@ -40,7 +47,7 @@ fn utc(ms: f64) -> String {
 pub fn ContactLog(
     visible: Signal<bool>,
     queue: RwSignal<StationQueue>,
-    contacted: RwSignal<Vec<String>>,
+    contacted: RwSignal<Vec<CompletedContact>>,
     ready: RwSignal<bool>,
 ) -> impl IntoView {
     let page = RwSignal::new(Page::default());
@@ -191,13 +198,31 @@ pub fn ContactLog(
             <div id="log-evidence" role="tabpanel" aria-labelledby="log-evidence-tab" hidden=move || !evidence_tab.get()>
                 {move || selected.get().map(|r| view! {
                     <h3>{format!("{} ↔ {} · {}", r.station_call, r.target, r.outcome)}</h3>
-                    <p>"RX times are captured transmission estimates; TX audio times describe successful local playback only. Earlier received messages provide context. RF dial frequency uses a fresh radio query when connected; unknown readbacks are left blank in ADIF."</p>
-                    <div class="table-scroll"><table><thead><tr><th>"Start UTC"</th><th>"End UTC"</th><th>"Evidence"</th><th>"Message"</th><th>"SNR dB"</th><th>"Audio Hz"</th><th>"Payload"</th></tr></thead><tbody>
-                        {r.evidence.into_iter().map(|e| view! { <tr><td>{utc(e.start_ms)}</td><td>{utc(e.end_ms)}</td><td>{e.direction}</td><td class="message">{e.message}</td><td>{e.snr_db.map(|n| format!("{n:+.1}")).unwrap_or_default()}</td><td>{format!("{:.1}",e.frequency_hz)}</td><td class="log-payload">{e.payload.unwrap_or_default()}</td></tr> }).collect_view()}
+                    <p>"RX times are captured transmission estimates; Decode available UTC is when the result reached this app. TX audio times describe successful local playback only. Earlier received messages provide context. RF dial frequency uses a fresh radio query when connected; unknown readbacks are left blank in ADIF."</p>
+                    <div class="table-scroll"><table><thead><tr><th>"Start UTC"</th><th>"End UTC"</th><th>"Decode available UTC"</th><th>"Evidence"</th><th>"Message"</th><th>"SNR dB"</th><th>"Audio Hz"</th><th>"Payload"</th></tr></thead><tbody>
+                        {r.evidence.into_iter().map(|e| view! { <tr><td>{utc(e.start_ms)}</td><td>{utc(e.end_ms)}</td><td>{e.received_at_ms.map(utc).unwrap_or_default()}</td><td>{e.direction}</td><td class="message">{e.message}</td><td>{e.snr_db.map(|n| format!("{n:+.1}")).unwrap_or_default()}</td><td>{format!("{:.1}",e.frequency_hz)}</td><td class="log-payload">{e.payload.unwrap_or_default()}</td></tr> }).collect_view()}
                     </tbody></table></div>
                 }.into_any()).unwrap_or_else(|| view! { <p>"Choose View events on a contact to inspect its timestamped evidence."</p> }.into_any())}
             </div>
         </section>
         </Show>
     }
+}
+
+#[derive(Deserialize, Default)]
+struct ExclusionPreference {
+    days: Option<u32>,
+    error: String,
+}
+pub fn saved_exclusion() -> (Option<u32>, String) {
+    match serde_json::from_str::<ExclusionPreference>(&load_exclusion()) {
+        Ok(p) => (p.days, p.error),
+        Err(e) => (
+            None,
+            format!("Recontact setting could not be restored: {e}"),
+        ),
+    }
+}
+pub fn save_exclusion_days(days: Option<u32>) -> String {
+    save_exclusion(&serde_json::to_string(&days).expect("serializable interval"))
 }

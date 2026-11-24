@@ -15,6 +15,7 @@ extern "C" {
         key: &js_sys::Function,
         release: &js_sys::Function,
         available: &js_sys::Function,
+        validate: &js_sys::Function,
     ) -> JsValue;
     #[wasm_bindgen(js_name = stopTransmitter)]
     fn stop_transmitter(tx: &JsValue) -> js_sys::Promise;
@@ -66,6 +67,7 @@ extern "C" {
         output_id: &str,
         use_radio: bool,
         start_ms: f64,
+        plan_id: f64,
     ) -> js_sys::Promise;
 }
 
@@ -117,6 +119,7 @@ pub fn StationsToContact(
     grid: RwSignal<String>,
     radio: RadioControl,
     running: ReadSignal<bool>,
+    receive_status: ReadSignal<String>,
     open_frequency: ReadSignal<Option<(f64, f32)>>,
     playing: RwSignal<bool>,
 ) -> impl IntoView {
@@ -214,17 +217,24 @@ pub fn StationsToContact(
         })
     }));
     let available = Rc::new(Closure::<dyn Fn() -> bool>::new(move || ptt.available()));
+    let validate = Rc::new(Closure::<dyn Fn(f64) -> bool>::new(move |id: f64| {
+        id.is_finite()
+            && id >= 1.0
+            && id.fract() == 0.0
+            && queue.with_untracked(|q| q.can_transmit(id as u64))
+    }));
     let tx = StoredValue::new_local(create_transmitter(
         key.as_ref().as_ref().unchecked_ref(),
         release.as_ref().as_ref().unchecked_ref(),
         available.as_ref().as_ref().unchecked_ref(),
+        validate.as_ref().as_ref().unchecked_ref(),
     ));
     Effect::new(move |_| {
         let db = attenuation.get();
         tx.with_value(|tx| set_attenuation(tx, db));
     });
     let generation = StoredValue::new_local(0_u64);
-    let callbacks = StoredValue::new_local((key, release, available));
+    let callbacks = StoredValue::new_local((key, release, available, validate));
     on_cleanup(move || {
         let promise = tx.with_value(dispose_transmitter);
         // JS may still be awaiting a keying ACK. Keep callbacks alive through release.
@@ -233,6 +243,23 @@ pub fn StationsToContact(
             let _ = JsFuture::from(promise).await;
             drop(keep);
         });
+    });
+
+    // React to decoded evidence immediately; an interval-only recheck can miss
+    // the gap between the last 100 ms tick and the audio/PTT deadline.
+    Effect::new(move |_| {
+        let stale = queue.with(|q| {
+            q.pending
+                .as_ref()
+                .is_some_and(|p| js_sys::Date::now() < p.start_ms && !q.can_transmit(p.id))
+        });
+        if stale {
+            queue.update(|q| q.refresh_pending(js_sys::Date::now()));
+            if current_plan.get_value().is_some() {
+                current_plan.set_value(None);
+                let _ = tx.with_value(cancel_current);
+            }
+        }
     });
 
     let validation = Signal::derive(move || {
@@ -252,21 +279,28 @@ pub fn StationsToContact(
             refresh_outputs(false);
         }
     });
-    let stop = move || {
+    let stop_for_reason = move |reason: String| {
         generation.update_value(|g| *g += 1);
-        queue.update(|q| q.stop());
+        queue.update(|q| q.stop_with_reason(&reason));
         let _ = tx.with_value(stop_transmitter);
         playing.set(false);
         busy.set(false);
         current_plan.set_value(None);
         phase.set(String::new());
         preparing.set(false);
-        status.set("Contacting paused. Waiting for Start contacting.".into());
+        status.set(reason);
     };
+    let stop = move || stop_for_reason("Contacting paused. Waiting for Start contacting.".into());
     // Audio input Stop/restart also disarms the queue, including output preparation.
     Effect::new(move |_| {
-        if !running.get() {
-            stop();
+        if !running.get()
+            && (queue.with_untracked(|q| q.enabled || q.active.is_some())
+                || preparing.get_untracked())
+        {
+            stop_for_reason(format!(
+                "Receive stopped: {}",
+                receive_status.get_untracked()
+            ));
         }
     });
     let start = move |_| {
@@ -321,6 +355,7 @@ pub fn StationsToContact(
             let active = tx.with_value(transmitter_busy);
             playing.set(tx.with_value(transmitter_playing));
             phase.set(tx.with_value(transmitter_phase));
+            queue.update(|q| q.refresh_pending(now));
             if let Some(id) = current_plan.get_value() {
                 let still_pending =
                     queue.with_untracked(|q| q.pending.as_ref().is_some_and(|p| p.id == id));
@@ -335,11 +370,22 @@ pub fn StationsToContact(
                     current_plan.set_value(None);
                 } else if !active {
                     let success = tx.with_value(transmitter_outcome) == "complete";
-                    queue.update(|q| q.complete(id, success));
+                    let reason = tx.with_value(transmitter_status);
+                    queue.update(|q| {
+                        if success {
+                            q.complete(id, true);
+                        } else if tx.with_value(transmitter_outcome) == "superseded" {
+                            q.revoke_pending(id);
+                        } else {
+                            q.fail(id, &reason);
+                        }
+                    });
                     current_plan.set_value(None);
-                    status.set(tx.with_value(transmitter_status));
+                    status.set(reason);
                 }
             }
+            // Clock-driven QSO limits must not depend on radio/query readiness.
+            queue.update(|q| q.advance_time(now));
             // Leave at least three seconds before the next slot's keying deadline.
             // Completed records survive queue removal and asynchronous persistence.
             if !active
@@ -378,8 +424,7 @@ pub fn StationsToContact(
                 return;
             }
             if !tx.with_value(transmitter_prepared) {
-                queue.update(|q| q.stop());
-                status.set(format!(
+                stop_for_reason(format!(
                     "{} Click Start contacting to resume.",
                     tx.with_value(transmitter_status)
                 ));
@@ -387,8 +432,7 @@ pub fn StationsToContact(
             }
             if use_radio.get_untracked() {
                 if !radio.configured() {
-                    stop();
-                    status.set("Radio disconnected; contacting paused.".into());
+                    stop_for_reason("Radio disconnected; contacting paused.".into());
                     return;
                 }
                 if !radio.ready() {
@@ -414,7 +458,7 @@ pub fn StationsToContact(
             let samples = match transmit::audio(&plan.message, plan.frequency_hz) {
                 Ok(pcm) => pcm,
                 Err(e) => {
-                    queue.update(|q| q.complete(plan.id, false));
+                    queue.update(|q| q.fail(plan.id, e));
                     status.set(e.into());
                     return;
                 }
@@ -422,7 +466,7 @@ pub fn StationsToContact(
             if use_radio.get_untracked()
                 && let Err(e) = radio.reserve()
             {
-                queue.update(|q| q.complete(plan.id, false));
+                queue.update(|q| q.fail(plan.id, &e));
                 status.set(e);
                 return;
             }
@@ -434,6 +478,7 @@ pub fn StationsToContact(
                     &output_id.get_untracked(),
                     use_radio.get_untracked(),
                     plan.start_ms,
+                    plan.id as f64,
                 )
             });
             current_plan.set_value(Some(plan.id));
@@ -444,9 +489,10 @@ pub fn StationsToContact(
                     if current_plan.try_with_value(|id| *id).flatten() != Some(plan.id) {
                         return;
                     }
-                    queue.update(|q| q.complete(plan.id, false));
+                    let reason = format!("Transmit paused: {}", error_text(e));
+                    queue.update(|q| q.fail(plan.id, &reason));
                     current_plan.set_value(None);
-                    status.set(format!("Transmit paused: {}", error_text(e)));
+                    status.set(reason);
                 }
             });
         })));
@@ -503,12 +549,24 @@ pub fn StationsToContact(
                     disabled=move || !(preparing.get() || busy.get() || queue.with(|q| q.enabled)) && (queue.with(|q| q.items.is_empty()) || !running.get() || validation.get().is_err() || !output_supported() || (use_radio.get() && !radio.configured()))>
                     {move || if preparing.get() || busy.get() || queue.with(|q| q.enabled) { "Stop contacting" } else { "Start contacting" }}
                 </button><button class="secondary" disabled=move || queue.with(|q| q.items.is_empty()) on:click=move |_| { stop(); queue.update(|q| q.clear()); }>"Remove all"</button><span>{move || format!("{} queued · first eligible CQ gets priority", queue.with(|q| q.items.len()))}</span></div>
+            <p class="contact-machine-state" role="status">{move || queue.with(|q| q.state_label())}</p>
+            <section class="contact-policy" aria-label="Conversation policy">
+                <strong>"Next action"</strong>
+                <p class="active-conversation">{move || queue.with(|q| q.active.as_ref()
+                    .map(|a| format!("{}: {}", if a.contact.is_established() { "Active conversation" } else { "Attempting contact" }, a.contact.target))
+                    .unwrap_or_else(|| "No active conversation · listening for an eligible CQ".into()))}</p>
+                <p class="contact-policy-decision" role="status">{move || queue.with(|q| q.policy_label())}</p>
+                <details class="contact-policy-rules"><summary>"Selection and attempt rules"</summary>
+                  <p>"Until a partner report arrives, this is a contact attempt: a fresh CQ can replace it in queue priority order. A partner report establishes an active conversation. Initial calls allow up to four transmissions. Recheck the received exchange before keying; otherwise listen."</p>
+                <p>"Received stages below show only decoded evidence. Local sent audio stays separate. Later stages allow three transmissions, with eight transmissions or three minutes per attempt."</p>
+                </details>
+            </section>
             <div class="card-sort" aria-label="Sort stations to contact">
                 <span>"Auto-sort:"</span>
                 <label><input type="checkbox" prop:checked=move || sort_state.get() on:change=move |ev| sort_state.set(event_target_checked(&ev)) />"State · CQ first"</label>
                 <label><input type="checkbox" prop:checked=move || sort_signal.get() on:change=move |ev| sort_signal.set(event_target_checked(&ev)) />"Signal ↓"</label>
                 <label><input type="checkbox" prop:checked=move || sort_distance.get() on:change=move |ev| sort_distance.set(event_target_checked(&ev)) />"Distance ↑"</label>
-                <span>"Active first · penalized last · checked keys: state, signal, distance (set My grid)"</span>
+                  <span>"Established QSO first · penalized last · checked keys: state, signal, distance (set My grid)"</span>
             </div>
             <div class="tx-level">
                 <label for="tx-attenuation">"TX level"</label>
@@ -529,11 +587,14 @@ pub fn StationsToContact(
                     let station = Signal::derive(move || queue.with(|q| q.items.iter().find(|s| s.call == card_call).cloned()).unwrap_or_else(|| initial.clone()));
                     let active_call = call.clone();
                     let contact = Signal::derive(move || queue.with(|q| q.active.as_ref().filter(|a| a.contact.target == active_call).map(|a| a.contact.clone())));
+                    let attempt_call = call.clone();
                     let stage_call = call.clone();
                     let pending_call = call.clone();
                     let pending = Signal::derive(move || queue.with(|q| q.pending.as_ref().filter(|p| p.target == pending_call).cloned()));
                     let transmitting = Signal::derive(move || pending.get().is_some() && playing.get());
                     let stages = Signal::derive(move || queue.with(|q| q.exchange_slots(&stage_call, clock.get())));
+                    let history_call = call.clone();
+                    let expected_call = call.clone();
                     let rank_call = call.clone();
                     let front_call = call.clone(); let back_call = call.clone(); let remove_call = call.clone();
                     view! {
@@ -542,6 +603,8 @@ pub fn StationsToContact(
                             class:has-transmitted=move || station.with(|s| s.sent_messages.iter().any(Option::is_some))
                             style=move || format!("--station-color:{0};--conversation-color:{0}", station.get().kind.color())>
                             <div class="toolbar"><h3>{call.clone()}</h3><span>{move || queue.with(|q| q.items.iter().position(|s| s.call == rank_call).map(|i| format!("Priority {}", i+1)).unwrap_or_default())}</span></div>
+                            <span class="station-role">{move || contact.get().map(|c| if c.is_established() { "Active conversation" } else { "Contact attempt" }).unwrap_or("Waiting conversation")}</span>
+                            <p class="station-expected">{move || queue.with(|q| q.expected_action(&expected_call))}</p>
                             <strong>{move || contact.get().map(|c| c.label().to_owned()).unwrap_or_else(|| station.get().state(js_sys::Date::now()).to_owned())}</strong>
                             <p class="station-cq">{move || station.with(|s| {
                                 s.last_cq_ms.map(|ms| format!("Last CQ: {}", age(clock.get() - ms - 12_640.0))).unwrap_or_else(|| "Last CQ: not heard this session".into())
@@ -572,7 +635,16 @@ pub fn StationsToContact(
                             <p class="station-location">{move || station.with(|s| crate::geography::description(s.location.as_ref().map(|(_, l)| l), &grid.get()))}</p>
                             <p class="message">{move || station.get().latest_text}</p>
                             <p>{move || station.get().note}</p>
-                            <p>{move || format!("Contact tries: {}", station.get().contact_tries)}</p>
+                            <p class="station-attempt-calls">{move || queue.with(|q| {
+                                q.active.as_ref().filter(|a| a.contact.target == attempt_call).map(|a| {
+                                    if a.contact.state() == crate::transmit::QsoState::Calling {
+                                        format!("Initial calls this attempt: {}/4", a.transmissions)
+                                    } else {
+                                        format!("Exchange transmissions this attempt: {}/8", a.transmissions)
+                                    }
+                                }).unwrap_or_else(|| "No active attempt".into())
+                            })}</p>
+                            <p>{move || format!("Total initial calls while queued: {}", station.get().contact_tries)}</p>
                             <p class="station-tx-status" role="status">{move || pending.get().map(|p| format!("{} · {}", if transmitting.get() { "TX AUDIO ON" } else { "TX queued / finishing" }, p.message)).unwrap_or_else(|| if contact.get().is_some() { "Listening · waiting for partner’s reply".into() } else { String::new() })}</p>
                             <crate::exchange_ui::ExchangeStages slots=stages transmit=Signal::derive(move || {
                                 let pending = pending.get();
@@ -586,7 +658,7 @@ pub fn StationsToContact(
                                         status: if transmitting && pending.is_some() { "Transmitting" }
                                             else if pending.is_some() { "Queued / finishing" }
                                             else if sent.is_some() { "Sent audio" }
-                                            else if contact.as_ref().is_some_and(|c| c.step == step) { "Next reply" }
+                                            else if contact.as_ref().is_some_and(|c| c.step() == step) { "Next reply" }
                                             else { "" }.into(),
                                         message: pending.map(|p| p.message.clone()).or_else(|| sent.cloned()).unwrap_or_default(),
                                         transmitting: transmitting && pending.is_some(),
@@ -595,7 +667,7 @@ pub fn StationsToContact(
                                 })).collect()
                             }) />
                             <p class="tx-state-legend">"Pulsing amber: transmitting audio · Steady cyan: sent audio. Local playback does not confirm RF delivery."</p>
-                            <details><summary>"Received evidence"</summary><ul>{move || station.get().evidence.into_iter().map(|m| view! { <li class="message">{m}</li> }).collect_view()}</ul></details>
+                            <details><summary>"Received conversation history"</summary><ul>{move || queue.with(|q| q.received_history(&history_call)).into_iter().map(|heard| view! { <li class="message">{heard.message}</li> }).collect_view()}</ul></details>
                             <div class="station-actions">
                                 <button class="secondary" on:click=move |_| queue.update(|q| q.to_front(&front_call))>"Move to front"</button>
                                 <button class="secondary" on:click=move |_| queue.update(|q| q.to_back(&back_call))>"Move to back"</button>

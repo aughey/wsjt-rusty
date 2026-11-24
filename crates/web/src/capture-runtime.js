@@ -105,6 +105,7 @@ export async function openCapture(onEvent, token) {
     try { await ready; } finally { clearTimeout(timeout); }
     checkCancelled();
     node.port.onmessage = ({ data }) => {
+      if (data.kind === 'input-level') emit(data);
       if (data.kind === 'stopped') {
         stopping = true;
         emit({ kind: 'flushing', error: data.error });

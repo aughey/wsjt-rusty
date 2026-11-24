@@ -26,7 +26,9 @@ the browser; the capture graph outputs silence to avoid speaker feedback.
 The full-page app has tabs for **Stations to contact**, **Spectrum**, **Radio
 control**, **Contact configuration**, **Log**, **Decoded messages**, and
 **Conversations**. Stations to contact combines the waterfall, world map and
-station cards in a responsive flex layout. Callsign, grid, audio output, PTT
+station cards in a responsive grid that stays within the viewport. The waterfall
+fills its plot; the Stations panel scrolls its controls and cards together without
+an additional page or card-list scrollbar. Callsign, grid, audio output, PTT
 selection lives in Contact configuration; TX audio attenuation is on Stations to contact. Start listening and
 Stop remain available above every tab. Arrow keys, Home and End navigate tabs.
 
@@ -66,6 +68,15 @@ frequency labels and a 60-second age scale. Newest spectra enter at the top at
 Hann-windowed RustFFT of browser time-domain snapshots (about 2.69 Hz/bin at
 44.1 kHz or 2.93 Hz/bin at 48 kHz). Display bins pool peaks so narrow signals
 remain visible. The optional input waveform is under the waterfall.
+
+**Input peak** above the waterfall shows the maximum absolute input sample in
+each quarter-second of continuous capture, before filtering or resampling. The
+meter runs from 0 to 1; keep the peak below 1. If capture peak notifications are
+unavailable, it uses the same live input snapshots as the waterfall (short peaks
+between snapshots may be missed). A full-scale sample shows
+**Clipping — reduce input gain**. This is a browser input level, independent of
+waterfall leveling, decoder SNR and RF power. Stop retains the last reading;
+Start clears it until fresh audio arrives.
 
 **Auto level** starts enabled: a smoothed median of the passband estimates the
 background, keeping ordinary noise dark rather than saturating the waterfall.
@@ -280,6 +291,12 @@ latency and audio-clock drift; this is not a precision time source. The page
 stops capture if the audio clock suspends or the input disappears, rather than
 joining disconnected audio under misleading timestamps. Keep the tab active;
 browser throttling, device changes and host load can interrupt live operation.
+The local Trunk server rebuilds changed files without automatically reloading the
+page: a reload resets the receive session and requires Start listening again.
+Stop listening/contacting, then refresh explicitly to use a new build. Unexpected
+capture errors stay visible in a wrapping
+alert on every application page until the next Start listening, rather than only
+in the truncated session status. Real audio gaps still stop and disarm contacting.
 
 An AudioWorklet copies consecutive mono PCM into quarter-second chunks, with a
 partial chunk flushed on Stop. Transport-only JavaScript delivers it to the slot
@@ -297,6 +314,13 @@ it stops capture, reports the error and finishes the contiguous audio already de
 skips a chunk or lets the queue grow without bound. Decode speed varies by
 browser/device; sustainable real-time performance is not guaranteed on all
 hardware. Unmounting cancels the session without a final decode.
+
+Queued-frequency sync ordering uses a bounded per-start-second FT8 FFT cache.
+Each lane can retain up to 32 spectra (about 47 MiB) during a subtraction pass,
+so crowded queues do not repeatedly rebuild the same large FFTs as candidate
+times jump around. This preserves priority order, full-band decoding, both
+passes and the aggregate 60-second PCM limit. Sustained hardware overload still
+stops explicitly; the fix does not enlarge the backlog or discard recovery work.
 
 Build static assets with `trunk build --release` from `crates/web` (output:
 `crates/web/dist`). Serve all output assets together. File hashing is disabled
@@ -457,3 +481,104 @@ SNR still sets outgoing reports; local playback remains separate from RX evidenc
 Waterfall transmit intervals scroll as blank rows. Local TX audio and FFT snapshots
 that still overlap its tail do not paint spectra or contribute to open-frequency
 occupancy; received history remains visible and continues aging against audio time.
+
+### Contact state and reply scheduling
+
+The queue displays whether contacting is paused, waiting for a fresh CQ, or in
+an active QSO, including the required outgoing action and audio reservation.
+Only one station owns the active exchange. Sorting and new CQs from other
+stations cannot replace it; completion, cancellation, another partner, a renewed
+CQ after progress, or an attempt limit releases it. A new attempt requires a
+fresh, unused CQ in its immediately following response window.
+
+`crates/conversations/src/session.rs` defines the headless `QsoState` progression: Calling, SendingReport,
+SendingRogerReport, SendingAcknowledgment, SendingFarewell and Closed. Validated
+ordinary messages from the selected partner addressed to our callsign advance
+it: locator selects report, report selects R-report, R-report selects RR73,
+RRR/RR73 selects 73, and received 73 closes the exchange. Missing intermediate
+RX stages are allowed; repeated or older-stage messages never regress state.
+Messages must belong to the partner's alternating UTC slots after the opening
+CQ; wrong recipients, other senders, invalid payload types and nonfinite times
+cannot advance it. Delayed recovery evidence is processed independently of the
+latest text on the station card.
+
+Playback completion updates sent history and retry counts, never RX progress.
+Before audio starts, the scheduler revokes a reserved waveform if new evidence
+requires another reply. Cancellation releases PTT before another plan can run;
+a canceled reservation's completion callback cannot count as sent. Evidence
+arriving after audio starts applies to the next frame. Retry exhaustion leaves
+the final reply window open before returning the station to the waiting queue.
+These rules have exhaustive state/event tests and queue timing regressions;
+they are not a claim of formally verified software or physical radio delivery.
+
+The fourth unanswered initial call is followed by its final receive window,
+shown as “waiting for final reply (4/4 calls)”. When that window closes, the
+regular clock tick ends the attempt, moves the station to the back, and applies
+the three-minute sorting penalty even while radio readiness or a frequency
+query blocks new transmissions. Repeated CQs do not reset the attempt's call
+budget. Cards show initial calls this attempt out of four separately from total initial
+calls while queued, which accumulate across attempts until capture restarts.
+The penalty changes sorting priority; a penalized station can still be selected
+on a new CQ if no unpenalized caller is eligible.
+
+An accepted RRR/RR73 commits the outgoing closing 73. Subsequent CQ or
+third-party exchanges cannot revoke that farewell, including while its audio
+is reserved. Explicit Stop, capture/output/radio failures and attempt limits
+still cancel it. Before acknowledgment, abandoning an exchange requires a newer
+partner receive slot; another decode's fine timing within the same slot cannot
+cancel the accepted response. Queued cards prefer our station/partner pair's
+received stage evidence over the partner's other conversations. Ended attempts
+replace the last “sent … awaiting response” note with their termination reason;
+capture interruptions retain their receive status on the card and in the log.
+Capture still stops on discontinuity, suspension or device loss rather than
+joining audio across a gap or automatically rearming transmit.
+
+### Receive readiness and final transmit authorization
+
+The slot worker reports the last UTC receive slot whose early search completed.
+Capture progress and recovery-lane completion do not supply this authorization.
+After the initial CQ response, a retry waits for the latest partner receive slot
+search to finish. A newly validated addressed response can select a new reply
+while full-band processing continues; an owed closing 73 remains eligible.
+If slot decoding misses the scheduling deadline, wait for a later usable slot
+instead of reserving the previous message blindly. Decoder passes, candidate
+caps, full-band processing and recovery work are unchanged.
+
+Received state changes revoke obsolete reserved audio immediately through a
+reactive callback, including changes to the outgoing report or audio frequency
+within the same QSO phase. The transport revalidates the plan before keying and
+after PTT acknowledgment, immediately before scheduling its source. Superseding
+cancels/unkeys without disarming or counting canceled audio as sent. Raw decodes
+of our own audio remain in evidence but cannot control the partner state or
+replace its SNR/frequency. Evidence now includes Decode available UTC, the first
+arrival time at the app, separately from the estimated transmission time;
+older logs have that column blank.
+
+The `contact-scheduler-browser.cjs` regression injects delayed reports and
+self-echoes through the running browser receiver, tests cancellation 50 ms before
+start without allowing an interval tick, and decodes the PCM that reached its
+simulated output using the release-WASM receiver. It covers the W4VPK report /
+R-report / RR73 sequence and subsequent QSO continuation. Simulated output does
+not establish physical sound-card or radio timing.
+
+### Conversation policy in Stations to contact
+
+The **Next action** panel identifies the active conversation and shows whether the
+policy is listening or preparing a specific message. Cards distinguish **Active
+conversation** from **Waiting conversation**, show the station-independent expected
+sender/recipient and stage, and provide **Received conversation history**. History
+is bounded to 64 messages plus six latest stage summaries; previously heard stages
+survive display-history trimming. Local sent audio remains separate.
+
+The zero-dependency `ft8-conversations` crate now owns the contact decisions in
+`manager.rs` and partner-evidence progression in `session.rs`. The browser passes
+priority-ordered candidates and current attempt facts to `manager::decide`, then
+executes its **Listen**, **Start**, **Transmit** or **End** result. When idle, only a
+CQ from the immediately preceding slot, ending within five seconds before the
+intended transmit boundary, is eligible. Decode arrival does not refresh CQ age.
+The active exchange keeps priority until completion, abandonment, explicit Stop or
+its attempt limit, including a final receive window after the fourth unanswered
+call. The next reply is checked again before keying and after the PTT acknowledgment;
+late valid partner evidence can revoke unstarted audio. Started frames finish.
+Device lifecycle, radio/output readiness, waveform generation, saved settings,
+sorting and contact logs remain browser responsibilities.

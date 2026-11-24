@@ -23,6 +23,7 @@ pub struct Update {
     pub received_seconds: f64,
     pub finished: bool,
     pub next_attempt_utc_ms: f64,
+    pub completed_slot_utc_ms: Option<f64>,
     pub decodes: Vec<TimedDecode>,
 }
 
@@ -86,6 +87,7 @@ pub struct Receiver {
     received: u64,
     finished: bool,
     next_attempt_utc_ms: f64,
+    completed_slot_utc_ms: Option<f64>,
     observer: Option<fn(&TimedDecode)>,
     role: ReceiveRole,
 }
@@ -124,6 +126,7 @@ impl Receiver {
             received: 0,
             finished: false,
             next_attempt_utc_ms: next_attempt(start_utc_ms),
+            completed_slot_utc_ms: None,
             observer,
             role: ReceiveRole::Combined,
         })
@@ -170,6 +173,7 @@ impl Receiver {
             } else {
                 self.stream.decode_pending(16 * SAMPLE_RATE)
             });
+            self.completed_slot_utc_ms = Some(((end_ms - 13_500.0) / 15_000.0).floor() * 15_000.0);
             self.next_attempt_utc_ms = next_attempt(end_ms);
         }
         Ok(self.update(decodes))
@@ -204,6 +208,7 @@ impl Receiver {
             received_seconds,
             finished: self.finished,
             next_attempt_utc_ms: self.next_attempt_utc_ms,
+            completed_slot_utc_ms: self.completed_slot_utc_ms,
             decodes: decodes
                 .into_iter()
                 .map(|decode| {
@@ -240,6 +245,25 @@ fn next_attempt(utc_ms: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receive_progress_certifies_completed_slot_searches_not_capture_or_recovery() {
+        let mut slot = Receiver::new(12000, 0.0).unwrap();
+        slot.set_role(ReceiveRole::Slot).unwrap();
+        let before = slot.push(0, &vec![0.0; 159000]).unwrap();
+        assert_eq!(before.completed_slot_utc_ms, None);
+        let done = slot.push(159000, &vec![0.0; 3000]).unwrap();
+        assert_eq!(done.completed_slot_utc_ms, Some(0.0));
+        let mut recovery = Receiver::new(12000, 0.0).unwrap();
+        recovery.set_role(ReceiveRole::Recovery).unwrap();
+        assert_eq!(
+            recovery
+                .push(0, &vec![0.0; 360000])
+                .unwrap()
+                .completed_slot_utc_ms,
+            None
+        );
+    }
 
     #[test]
     fn activity_brackets_early_recovery_and_stop_attempts() {

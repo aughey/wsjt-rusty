@@ -10,10 +10,65 @@ pub mod transmit;
 pub mod waveform;
 
 use message::Messages;
+use rustfft::Fft;
 use rustfft::{FftPlanner, num_complex::Complex32 as C};
 use serde::Serialize;
 const COSTAS: [usize; 7] = [3, 1, 4, 0, 6, 5, 2];
 const GRAY: [usize; 8] = [0, 1, 3, 2, 5, 6, 4, 7];
+
+const LONG_FFT_SIZE: usize = 192000;
+// Covers candidate-start seconds in a 30-second receive window, while keeping
+// batch callers with longer recordings bounded (about 47 MiB at capacity).
+const PRIORITY_SPECTRA: usize = 32;
+
+struct Spectra {
+    entries: Vec<(isize, Vec<C>)>,
+    capacity: usize,
+    scratch: Vec<C>,
+    #[cfg(test)]
+    transforms: usize,
+}
+
+impl Spectra {
+    fn new(capacity: usize, fft: &dyn Fft<f32>) -> Self {
+        Self {
+            entries: Vec::new(),
+            capacity,
+            scratch: vec![C::default(); fft.get_inplace_scratch_len()],
+            #[cfg(test)]
+            transforms: 0,
+        }
+    }
+
+    fn get(&mut self, second: isize, audio: &[f32], fft: &dyn Fft<f32>) -> &[C] {
+        if let Some(index) = self.entries.iter().position(|(key, _)| *key == second) {
+            // Most-recently-used last. Move the Vec handle, not its FFT data.
+            let entry = self.entries.remove(index);
+            self.entries.push(entry);
+        } else {
+            let mut spectrum = if self.entries.len() == self.capacity {
+                self.entries.remove(0).1
+            } else {
+                vec![C::default(); LONG_FFT_SIZE]
+            };
+            spectrum.fill(C::default());
+            let start = ((second as f32 - 0.5) * 12000.0).round() as isize;
+            for (i, v) in spectrum.iter_mut().take(180000).enumerate() {
+                let p = start + i as isize;
+                if p >= 0 && p < audio.len() as isize {
+                    v.re = audio[p as usize];
+                }
+            }
+            fft.process_with_scratch(&mut spectrum, &mut self.scratch);
+            #[cfg(test)]
+            {
+                self.transforms += 1;
+            }
+            self.entries.push((second, spectrum));
+        }
+        &self.entries.last().expect("spectrum inserted").1
+    }
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct Decode {
     pub start_seconds: f32,
@@ -360,9 +415,17 @@ fn decode_once(
     }
     eprintln!("Searching {} Costas candidates", candidates.len());
     let mut results: Vec<Decode> = Vec::new();
-    let mut cached_second = isize::MIN;
-    let mut spectrum = vec![C::default(); 192000];
-    let long_fft = planner.plan_fft_forward(192000);
+    let long_fft = planner.plan_fft_forward(LONG_FFT_SIZE);
+    // Priority sync sorting revisits seconds. A single cached spectrum would
+    // rebuild a large FFT for almost every candidate in a crowded queue.
+    let mut spectra = Spectra::new(
+        if priorities.is_empty() {
+            1
+        } else {
+            PRIORITY_SPECTRA
+        },
+        &*long_fft,
+    );
     let symbol_fft = planner.plan_fft_forward(32);
     let mut last_report = -1;
     for candidate in candidates {
@@ -378,20 +441,9 @@ fn decode_once(
             continue;
         }
         let origin = second as f32 - 0.5;
-        if second != cached_second {
-            spectrum.fill(C::default());
-            let start = (origin * 12000.0).round() as isize;
-            for (i, v) in spectrum.iter_mut().take(180000).enumerate() {
-                let p = start + i as isize;
-                if p >= 0 && p < audio.len() as isize {
-                    v.re = audio[p as usize];
-                }
-            }
-            long_fft.process(&mut spectrum);
-            cached_second = second;
-        }
+        let spectrum = spectra.get(second, audio, &*long_fft);
         let mut frequency = candidate.frequency;
-        let mut data = downsample(&spectrum, frequency, &mut planner);
+        let mut data = downsample(spectrum, frequency, &mut planner);
         let initial = ((candidate.time - origin) * 200.0).round() as isize;
         let mut start = (initial - 10..=initial + 10)
             .max_by(|&a, &b| sync(&data, a, 0.0).total_cmp(&sync(&data, b, 0.0)))
@@ -403,7 +455,7 @@ fn decode_once(
             .unwrap() as f32
             * 0.5;
         frequency += tweak;
-        data = downsample(&spectrum, frequency, &mut planner);
+        data = downsample(spectrum, frequency, &mut planner);
         start = (start - 4..=start + 4)
             .max_by(|&a, &b| sync(&data, a, 0.0).total_cmp(&sync(&data, b, 0.0)))
             .unwrap();
@@ -502,4 +554,43 @@ fn decode_once(
             .then(a.frequency_hz.total_cmp(&b.frequency_hz))
     });
     results
+}
+
+#[cfg(test)]
+mod spectrum_tests {
+    use super::*;
+
+    #[test]
+    fn reordered_candidates_reuse_exact_spectra_with_bounded_storage() {
+        let audio: Vec<f32> = (0..360000).map(|i| (i as f32 * 0.173).sin()).collect();
+        let fft = FftPlanner::new().plan_fft_forward(LONG_FFT_SIZE);
+        let mut cached = Spectra::new(PRIORITY_SPECTRA, &*fft);
+        // Jump between all 32 start seconds as priority/sync sorting does,
+        // including the partially captured leading and trailing buffers.
+        for round in 0..3 {
+            for i in 0..PRIORITY_SPECTRA {
+                let second = ((i * 13 + round * 7) % PRIORITY_SPECTRA) as isize - 3;
+                let actual = cached.get(second, &audio, &*fft);
+                let mut expected = vec![C::default(); LONG_FFT_SIZE];
+                for (i, value) in expected[..180000].iter_mut().enumerate() {
+                    let sample = second * 12000 - 6000 + i as isize;
+                    if sample >= 0
+                        && let Some(&sample) = audio.get(sample as usize)
+                    {
+                        value.re = sample;
+                    }
+                }
+                fft.process(&mut expected);
+                assert_eq!(actual, expected);
+            }
+        }
+        assert_eq!(cached.transforms, PRIORITY_SPECTRA);
+        for second in 29..70 {
+            cached.get(second, &audio, &*fft);
+            assert_eq!(cached.entries.len(), PRIORITY_SPECTRA);
+        }
+        assert_eq!(cached.transforms, PRIORITY_SPECTRA + 41);
+        cached.get(69, &audio, &*fft);
+        assert_eq!(cached.transforms, PRIORITY_SPECTRA + 41);
+    }
 }

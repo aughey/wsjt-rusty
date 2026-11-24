@@ -93,3 +93,52 @@ test('great-circle paths split across the date line with finite coordinates',()=
     assert.ok(parts.flat().every(p=>p.every(Number.isFinite)));
     for(const part of parts)assert.ok(part.every((p,i)=>!i||Math.abs(p[0]-part[i-1][0])<=180));
 });
+
+test('completed history comes from the full durable log with the latest completion date per station',async()=>{
+    const idb=new IDBFactory(),request=worker(idb),day=86400000;
+    const old={...record('old'),end_ms:record().end_ms-8*day};
+    const recent={...record('recent'),end_ms:record().end_ms-day};
+    const failed={...record('failed'),target:'W1FAIL',outcome:'Interrupted'};
+    const many=Array.from({length:30},(_,i)=>({...record(`other-${i}`),target:`K${i}XYZ`}));
+    await request({action:'save',records:[old,recent,failed,...many]});
+    const result=(await worker(idb)({action:'list',offset:25})).result;
+    assert.ok(result.records.length<25);
+    assert.deepEqual(result.contacted.find(r=>r.target==='K1ABC'),{target:'K1ABC',end_ms:recent.end_ms});
+    assert.equal(result.contacted.filter(r=>r.target==='K1ABC').length,1);
+    assert.equal(result.contacted.some(r=>r.target==='W1FAIL'),false);
+    assert.equal(result.contacted.length,31,'exclusion is independent of the visible log page');
+});
+
+test('recontact preferences survive reload, validate stored values, and report storage failures',()=>{
+    const runtime=fs.readFileSync(path.join(__dirname,'../src/contact-log-runtime.js'),'utf8').replaceAll('export ','');
+    const values=new Map(),storage={getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v)};
+    const load=()=>{const scope={localStorage:storage};vm.createContext(scope);vm.runInContext(runtime,scope);return scope;};
+    let scope=load();
+    assert.equal(JSON.parse(scope.loadContactExclusion()).days,null);
+    for(const days of [7,1,36500,0,null]) {
+        assert.equal(scope.saveContactExclusion(JSON.stringify(days)),'');
+        scope=load(); assert.equal(JSON.parse(scope.loadContactExclusion()).days,days);
+    }
+    for(const invalid of [-1,1.5,36501,'7',{},true]) {
+        storage.setItem('wsjt-rusty-contact-exclusion-days',JSON.stringify(invalid));
+        assert.match(JSON.parse(scope.loadContactExclusion()).error,/could not be restored/);
+        assert.match(scope.saveContactExclusion(JSON.stringify(invalid)),/could not be saved/);
+    }
+    storage.setItem=()=>{throw new Error('quota');};
+    assert.match(scope.saveContactExclusion('7'),/quota/);
+});
+
+
+test('interruption cause survives persistence, reload and incomplete ADIF export',async()=>{
+    const idb=new IDBFactory(), request=worker(idb);
+    const cause='Receive stopped: Audio clock discontinuity. Capture stopped.';
+    const r={...record('interrupted-with-cause'),outcome:cause};
+    await request({action:'save',records:[r]});
+    const reloaded=worker(idb);
+    assert.equal((await reloaded({action:'list'})).result.records[0].outcome,cause);
+    assert.equal((await reloaded({action:'export'})).result.count,0);
+    const exported=(await reloaded({action:'export',include_incomplete:true})).result;
+    const fields=adifFields(exported.text);
+    assert.equal(fields.find(f=>f[0]==='APP_WSJT_RUSTY_STATUS')[1],cause);
+    assert.equal(fields.find(f=>f[0]==='QSO_COMPLETE')[1],'N');
+});

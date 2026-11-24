@@ -21,10 +21,10 @@ export async function listAudioOutputs(requestPermission) {
   const devices = await navigator.mediaDevices.enumerateDevices();
   return JSON.stringify(devices.filter(d => d.kind === 'audiooutput').map(d => ({ id: d.deviceId, label: d.label || 'Audio output' })));
 }
-export function createTransmitter(key, release, available) {
+export function createTransmitter(key, release, available, validate = () => true) {
   const tx = { context: null, source: null, gainNode: null, attenuationDb: 0, generation: 0, busy: false, disposed: false,
-    key, release, available, keyPromise: null, stopping: null, preparing: false, outcome: '', lastStatus: '', useRadio: false };
-  tx.visibility = () => { if (document.hidden) void stopTransmitter(tx); };
+    key, release, available, validate, keyPromise: null, stopping: null, preparing: false, outcome: '', lastStatus: '', useRadio: false };
+  tx.visibility = () => { if (document.hidden) void stopTransmitter(tx, 'Tab hidden; contacting paused.'); };
   tx.deviceChange = () => {
     if (!tx.busy) return;
     void navigator.mediaDevices.enumerateDevices().then(devices => {
@@ -146,13 +146,18 @@ export function transmitterPhase(tx) {
   return remaining > 0 ? `Waiting · starts in ${remaining.toFixed(1)} s`
     : `Playing FT8 audio · ${Math.max(0, 12.64 + remaining).toFixed(1)} s remaining`;
 }
-export async function playTransmission(tx, samples, receiveSlot, outputId, useRadio, requestedStartMs = NaN) {
+export async function playTransmission(tx, samples, receiveSlot, outputId, useRadio, requestedStartMs = NaN, planId = NaN) {
   if (tx.disposed || tx.busy || tx.preparing || tx.stopping) throw new Error('Audio output is already active or closed');
   // The caller has reserved PTT before entering this function. Even setup failures release it.
   tx.useRadio = useRadio; tx.busy = true;
   const generation = ++tx.generation;
   const current = () => generation === tx.generation && !tx.disposed;
   const check = () => { if (!current()) throw new Error('Transmission canceled'); };
+  const approved = () => tx.validate(planId);
+  const supersede = async () => {
+    await stopTransmitter(tx, 'Reply superseded by received evidence; waiting for a current reply.', true);
+    if (tx.outcome !== 'error') tx.outcome = 'superseded';
+  };
   try {
     if (document.hidden) throw new Error('Keep this tab visible for timed audio');
     if (!outputId) throw new Error('Select your radio audio output first');
@@ -169,6 +174,7 @@ export async function playTransmission(tx, samples, receiveSlot, outputId, useRa
     if (useRadio && !tx.available()) throw new Error('Radio disconnected before transmit');
     const devices = await navigator.mediaDevices.enumerateDevices(); check();
     if (outputId !== 'default' && !devices.some(d => d.kind === 'audiooutput' && d.deviceId === outputId)) throw new Error('Saved audio output is unavailable; select the radio card again');
+    if (!approved()) { await supersede(); return requestedStartMs; }
     const audioNow = context.currentTime;
     const now = Date.now();
     let slot = Math.ceil((now + 1000 - 500) / 15000);
@@ -184,20 +190,29 @@ export async function playTransmission(tx, samples, receiveSlot, outputId, useRa
     source.onended = () => {
       if (current()) tx.endTimer = setTimeout(() => { void stopTransmitter(tx, 'FT8 audio complete; receive requested.', true); }, 200);
     };
-    tx.monitor = setInterval(() => { if (current() && useRadio && !tx.available()) void stopTransmitter(tx, 'Radio disconnected; transmission canceled.'); }, 100);
+    tx.monitor = setInterval(() => {
+      if (!current()) return;
+      if (Date.now() < startMs && !approved()) { void supersede(); return; }
+      if (useRadio && !tx.available()) void stopTransmitter(tx, 'Radio disconnected; transmission canceled.');
+    }, 100);
     if (useRadio) {
       tx.keyTimer = setTimeout(async () => {
         if (!current()) return;
         try {
           if (Date.now() > startMs - 50) throw new Error('Missed keying deadline; transmission canceled');
+          if (!approved()) { await supersede(); return; }
           tx.keyPromise = Promise.resolve(tx.key());
           await tx.keyPromise; check();
+          if (!approved()) { await supersede(); return; }
           if (context.currentTime >= tx.startTime - .025 || Date.now() > startMs - 25) throw new Error('PTT was not ready before UTC start; transmission canceled');
           source.start(tx.startTime);
           tx.sourceStarted = true;
         } catch (error) { if (current()) { await stopTransmitter(tx, error.message || String(error)); tx.outcome = 'error'; } }
       }, Math.max(0, startMs - Date.now() - 500));
-    } else { source.start(tx.startTime); tx.sourceStarted = true; }
+    } else {
+      if (!approved()) { await supersede(); return startMs; }
+      source.start(tx.startTime); tx.sourceStarted = true;
+    }
     return startMs;
   } catch (error) {
     if (current()) { await stopTransmitter(tx, `Transmission failed: ${error.message || error}`); tx.outcome = 'error'; }

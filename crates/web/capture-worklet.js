@@ -5,6 +5,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this.active = false;
     this.used = 0;
     this.pending = 0;
+    this.peak = 0;
     this.buffer = new Float32Array(Math.ceil(sampleRate / 4)); // quarter-second transport chunks
     this.port.onmessage = ({ data }) => {
       if (data.kind === 'connect') {
@@ -24,6 +25,9 @@ class CaptureProcessor extends AudioWorkletProcessor {
       return false;
     }
     const samples = this.used === this.buffer.length ? this.buffer : this.buffer.slice(0, this.used);
+    // Meter every captured sample, independently of display/decoder scheduling.
+    this.port.postMessage({ kind: 'input-level', peak: this.peak });
+    this.peak = 0;
     this.sink.postMessage({ kind: 'samples', frame: this.frame, samples }, [samples.buffer]);
     this.pending++;
     this.buffer = new Float32Array(Math.ceil(sampleRate / 4));
@@ -57,6 +61,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < mono.length; i++) {
       if (this.used === 0) this.frame = currentFrame + i;
       this.buffer[this.used++] = mono[i];
+      this.peak = Math.max(this.peak, Math.abs(mono[i]));
       if (this.used === this.buffer.length && !this.send()) break;
     }
     return true;

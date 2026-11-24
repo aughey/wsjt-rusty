@@ -83,6 +83,7 @@ test('saved station/output, selected sink, timed PTT, cancellation and device/er
   assert.equal(api.transmitterPrepared(tx), true);
   await api.playTransmission(tx, pcm, 2, 'radio-card', true);
   document.hidden = true; listeners.get('visibilitychange')(); await flush();
+  assert.match(api.transmitterStatus(tx), /Tab hidden/, 'retain the specific cancellation cause');
   assert.equal(api.transmitterBusy(tx), false);
   assert.equal(events.filter(e => e === 'key').length, 1, 'cancel before key never starts TX');
   document.hidden = false;
@@ -143,6 +144,54 @@ test('saved station/output, selected sink, timed PTT, cancellation and device/er
   await api.stopTransmitter(tx3, 'FT8 audio complete; receive requested.', true);
   assert.equal(api.transmitterOutcome(tx3), 'error');
   assert.equal(api.transmitterPrepared(tx3), false);
+  // A superseded QSO reply releases its reservation before a replacement runs,
+  // retaining the primed output and never reporting canceled audio as sent.
+  let supersededRelease;
+  const replacementEvents = [];
+  const tx4 = api.createTransmitter(async () => { replacementEvents.push('key'); },
+    () => new Promise(resolve => { replacementEvents.push('release'); supersededRelease = resolve; }), () => true);
+  await api.playTransmission(tx4, pcm, 2, 'radio-card', true, Date.now() + 1500);
+  const reservedContext = contexts.at(-1);
+  const canceledReply = api.cancelQueuedTransmission(tx4);
+  await flush();
+  assert.equal(api.transmitterBusy(tx4), true, 'replacement waits for reservation release');
+  await assert.rejects(api.playTransmission(tx4, pcm, 2, 'radio-card', true), /already active/);
+  supersededRelease(); await canceledReply;
+  assert.equal(reservedContext.source.stopped, true);
+  assert.equal(api.transmitterOutcome(tx4), 'canceled');
+  assert.equal(api.transmitterPrepared(tx4), true);
+  assert.deepEqual(replacementEvents, ['release'], 'superseded audio never keys');
+  await api.playTransmission(tx4, pcm, 2, 'radio-card', true, Date.now() + 1500);
+  assert.equal(contexts.at(-1), reservedContext, 'replacement reuses primed output');
+  const finalCancel = api.disposeTransmitter(tx4);
+  await flush(); supersededRelease(); await finalCancel;
+  // Evidence arriving after reservation must be checked at keying, independently
+  // of the Rust/UI scheduler's polling cadence.
+  let authorized = true, unblockKey;
+  const guardedEvents = [];
+  const guarded = api.createTransmitter(async () => { guardedEvents.push('key'); },
+    async () => { guardedEvents.push('release'); }, () => true, id => authorized && id === 77);
+  await api.playTransmission(guarded, pcm, 2, 'radio-card', true, Date.now() + 1500, 77);
+  const guardedContext = contexts.at(-1);
+  t.mock.timers.tick(999); await flush();
+  authorized = false;
+  t.mock.timers.tick(1); await flush();
+  assert.equal(guardedContext.source.startTime, undefined, 'stale waveform cannot reach source.start');
+  assert.deepEqual(guardedEvents, ['release'], 'reject before key, even between interval ticks');
+  assert.equal(api.transmitterOutcome(guarded), 'superseded');
+  assert.equal(api.transmitterPrepared(guarded), true);
+  await api.disposeTransmitter(guarded);
+  authorized = true;
+  const ackGuard = api.createTransmitter(() => new Promise(resolve => { unblockKey = resolve; }),
+    async () => { guardedEvents.push('release after ACK'); }, () => true, () => authorized);
+  await api.playTransmission(ackGuard, pcm, 2, 'radio-card', true, Date.now() + 1500, 78);
+  const ackContext = contexts.at(-1);
+  t.mock.timers.tick(1000); await flush();
+  authorized = false; unblockKey(); await flush();
+  assert.equal(ackContext.source.startTime, undefined, 'RX advancement during key ACK cannot start old PCM');
+  assert.equal(api.transmitterOutcome(ackGuard), 'superseded');
+  assert.equal(api.transmitterBusy(ackGuard), false);
+  await api.disposeTransmitter(ackGuard);
   await api.disposeTransmitter(tx2); await api.disposeTransmitter(tx3);
   await api.disposeTransmitter(tx); assert.equal(listeners.size, 0);
   await assert.rejects(api.playTransmission(tx, pcm, 2, 'radio-card', true), /closed/);

@@ -10,6 +10,9 @@ pub struct Evidence {
     pub payload: Option<String>,
     pub snr_db: Option<f32>,
     pub frequency_hz: f32,
+    /// When the UI first received this decode, distinct from its radio-frame time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,6 +34,20 @@ pub struct ContactRecord {
 }
 
 impl ContactRecord {
+    pub fn record_arrival(&mut self, start_ms: f64, text: &str, received_ms: f64) -> bool {
+        let mut changed = false;
+        for event in &mut self.evidence {
+            if event.direction == "RX"
+                && event.message == text
+                && (event.start_ms - start_ms).abs() < 350.0
+                && event.received_at_ms.is_none()
+            {
+                event.received_at_ms = Some(received_ms);
+                changed = true;
+            }
+        }
+        changed
+    }
     pub fn hear(&mut self, event: Evidence) -> bool {
         if self.evidence.iter().any(|old| {
             old.direction == event.direction
@@ -61,5 +78,21 @@ impl ContactRecord {
             }
         }
         true
+    }
+}
+
+/// Latest completed exchange per station, queried from the durable log.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CompletedContact {
+    pub target: String,
+    pub end_ms: f64,
+}
+
+/// Zero days disables exclusion; None excludes all completed contacts.
+pub fn exclusion_since(days: Option<u32>, now_ms: f64) -> f64 {
+    match days {
+        None => f64::NEG_INFINITY,
+        Some(0) => f64::INFINITY,
+        Some(days) => now_ms - f64::from(days) * 86_400_000.0,
     }
 }

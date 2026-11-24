@@ -62,44 +62,21 @@ impl MessageKind {
 /// (i3 = 1, 2, 4). Free text, telemetry and specialized contest forms stay Other,
 /// even when their rendered text contains a word such as CQ or 73.
 pub fn classify(message: &str, payload: &str) -> MessageKind {
-    use MessageKind::*;
-    if payload.len() != 77 || !payload.bytes().all(|c| matches!(c, b'0' | b'1')) {
-        return Other;
-    }
-    let kind = payload.as_bytes()[74..]
-        .iter()
-        .fold(0, |n, &bit| n * 2 + bit - b'0');
-    if !matches!(kind, 1 | 2 | 4) {
-        return Other;
-    }
-    let words: Vec<_> = message.split_whitespace().collect();
-    if words.len() < 2 {
-        return Other;
-    }
-    if matches!(words[0], "CQ" | "QRZ") {
-        return Cq;
-    }
-    let tail = words[words.len() - 1];
-    match tail {
-        "73" | "RR73" => Signoff,
-        "RRR" => Acknowledgment,
-        _ if tail.strip_prefix('R').is_some_and(report) => RogerReport,
-        _ if report(tail) => Report,
-        _ if words.len() == 2 || locator(tail) => Reply,
-        _ => Other,
-    }
+    ft8_conversations::classify(message, payload).into()
 }
 
-fn report(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 3 && matches!(bytes[0], b'+' | b'-') && bytes[1..].iter().all(u8::is_ascii_digit)
-}
-
-fn locator(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 4
-        && bytes[..2].iter().all(|c| (b'A'..=b'R').contains(c))
-        && bytes[2..].iter().all(u8::is_ascii_digit)
+impl From<ft8_conversations::MessageKind> for MessageKind {
+    fn from(kind: ft8_conversations::MessageKind) -> Self {
+        match kind {
+            ft8_conversations::MessageKind::Cq => Self::Cq,
+            ft8_conversations::MessageKind::Reply => Self::Reply,
+            ft8_conversations::MessageKind::Report => Self::Report,
+            ft8_conversations::MessageKind::RogerReport => Self::RogerReport,
+            ft8_conversations::MessageKind::Acknowledgment => Self::Acknowledgment,
+            ft8_conversations::MessageKind::Signoff => Self::Signoff,
+            ft8_conversations::MessageKind::Other => Self::Other,
+        }
+    }
 }
 
 #[cfg(test)]

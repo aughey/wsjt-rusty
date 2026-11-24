@@ -30,3 +30,24 @@ export async function downloadAdif(includeIncomplete) {
     return `${result.count} contact records exported as ADIF.`;
 }
 export function disposeContactLog() {fail(new Error('Contact log closed; unacknowledged records were not discarded.'));}
+
+const exclusionKey = 'wsjt-rusty-contact-exclusion-days';
+export function loadContactExclusion() {
+    try {
+        const raw = localStorage.getItem(exclusionKey);
+        const days = raw === null ? null : JSON.parse(raw);
+        if (days !== null && (!Number.isInteger(days) || days < 0 || days > 36500))
+            throw new Error('Invalid saved recontact interval. Choose and save it again.');
+        return JSON.stringify({days, error:''});
+    } catch (error) {
+        return JSON.stringify({days:null, error:`Recontact setting could not be restored: ${error.message}`});
+    }
+}
+export function saveContactExclusion(json) {
+    try {
+        const days = JSON.parse(json);
+        if (days !== null && (!Number.isInteger(days) || days < 0 || days > 36500)) throw new Error('Invalid interval');
+        localStorage.setItem(exclusionKey, JSON.stringify(days));
+        return '';
+    } catch (error) { return `Recontact setting could not be saved: ${error.message}`; }
+}

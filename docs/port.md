@@ -26,6 +26,7 @@ Package version, Rust edition and license are inherited from `[workspace.package
 | `wsjt-wspr` | `crates/wspr` | WSPR receive algorithms, Fano coding and 50-bit messages. |
 | `wsjt-rusty` | `crates/decoder` | Shared result/settings contracts, protocol adapters and bounded streaming. |
 | `wsjt-rusty-cli` | `crates/cli` | Standalone `wsjt-rusty` binary: arguments, input and text/JSONL output. |
+| `ft8-conversations` | `crates/conversations` | Standalone FT8 conversation interpretation; standard library only. |
 | `wsjt-web` | `crates/web` | Browser FT8 UI, capture, waterfall/map, contact queue, transmit audio, radio controls and local log. |
 
 The protocol crates can be used directly without the CLI or WAV loader. The
@@ -35,6 +36,9 @@ Framework integration tests live in `crates/decoder/tests`, audio input tests
 in `crates/audio/tests`, and algorithm unit tests in their owning crates.
 Unchanged recordings and golden vectors stay in the root `tests/fixtures`
 directory.
+
+See [the conversation crate](../crates/conversations/README.md) for its independent
+build/test commands and decoded-message input contract.
 
 ## Shared decoder framework
 

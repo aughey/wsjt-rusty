@@ -46,15 +46,18 @@ const assert = require('node:assert/strict');
             emitted:events.filter(e=>e.kind==='decode-found').map(e=>e.decode.payload).sort(), payloads:update.decodes.map(d=>d.payload).sort(), cqBeforeComplete:cq.at<end.at };
         } finally { worker.terminate();channel.port1.close(); }
       }
-      return { baseline:await run([]), prioritized:await run([1196.875]) };
+      return { baseline:await run([]), prioritized:await run([1196.875]),
+        crowded:await run(Array.from({length:100},(_,i)=>100+i*39)) };
     },wav);
     assert.equal(measurements.prioritized.first,'CQ F5RXL IN94');
     assert.equal(measurements.prioritized.cqBeforeComplete,true);
     assert.equal(measurements.prioritized.payloads.length,19);
     assert.deepEqual(measurements.prioritized.payloads,measurements.baseline.payloads);
     assert.deepEqual(measurements.prioritized.emitted,measurements.prioritized.payloads);
+    assert.deepEqual(measurements.crowded.payloads,measurements.baseline.payloads);
+    assert.deepEqual(measurements.crowded.emitted,measurements.crowded.payloads);
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({baselineCQms:measurements.baseline.cqMs,priorityCQms:measurements.prioritized.cqMs,fullDecodeMs:measurements.prioritized.totalMs,payloads:measurements.prioritized.payloads.length}));
+    console.log(JSON.stringify({baselineCQms:measurements.baseline.cqMs,baselineDecodeMs:measurements.baseline.totalMs,priorityCQms:measurements.prioritized.cqMs,fullDecodeMs:measurements.prioritized.totalMs,crowdedDecodeMs:measurements.crowded.totalMs,payloads:measurements.prioritized.payloads.length}));
     console.log('PASS: queued frequency emitted first during ongoing release-WASM decode; complete independent fixture payload set retained');
   } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

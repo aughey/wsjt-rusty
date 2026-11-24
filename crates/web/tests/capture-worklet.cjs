@@ -19,8 +19,8 @@ function capture(rate = 12000) {
   processor.port.onmessage({ data: { kind: 'connect', port: sink } });
   return {
     events, chunks, sink,
-    block(length = 128) {
-      const input = new Float32Array(length).fill(0.25);
+    block(length = 128, amplitude = 0.25) {
+      const input = new Float32Array(length).fill(amplitude);
       processor.process([[input]]);
       scope.currentFrame += length;
     },
@@ -42,6 +42,17 @@ test('continuous samples and final partial chunk retain absolute audio frame pos
   assert.equal(c.chunks.at(-1).kind, 'finish');
   c.stop();
   assert.equal(c.chunks.filter(e => e.kind === 'finish').length, 1);
+});
+
+test('input peaks include negative transients, reset per chunk, and flush the final tail', () => {
+  const c = capture();
+  c.block(2999, 0.25);
+  c.block(1, -1);
+  c.block(3000, 0);
+  c.block(1, -0.75);
+  c.stop();
+  assert.deepEqual(c.events.filter(e => e.kind === 'input-level').map(e => e.peak), [1, 0, 0.75]);
+  assert.equal(c.chunks[0].samples[2999], -1);
 });
 
 test('overrun stops with an explicit error and never queues more than 60 seconds', () => {

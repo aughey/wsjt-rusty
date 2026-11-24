@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 const HISTORY_MS: f64 = 60_000.0;
 const MAX_ROWS: usize = 600;
 /// Lower edge of the automatic transmit search, independent of RX display bounds.
-pub const SEARCH_LOW_HZ: f32 = 250.0;
+pub const SEARCH_LOW_HZ: f32 = 400.0;
 /// Upper edge of the automatic transmit search, independent of RX display bounds.
 pub const SEARCH_HIGH_HZ: f32 = 2500.0;
 

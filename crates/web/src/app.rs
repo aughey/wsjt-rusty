@@ -132,6 +132,8 @@ fn draw(canvas: &HtmlCanvasElement, ctx: &CanvasRenderingContext2d, samples: &[f
 
 #[derive(Clone, Copy)]
 struct DisplaySignals {
+    input_peak: WriteSignal<Option<f32>>,
+    continuous_peak: RwSignal<bool>,
     floor: ReadSignal<f32>,
     automatic: ReadSignal<bool>,
     clock: WriteSignal<Option<(f64, f64)>>,
@@ -163,6 +165,14 @@ fn animate(
             } = &mut *state;
             let Some(capture) = capture else { return };
             capture.analyser.get_float_time_domain_data(samples);
+            if !display.continuous_peak.get_untracked() {
+                // Keep the meter live even when a browser does not deliver
+                // worklet level notifications. Use the same unmodified input
+                // snapshot as the waterfall, including out-of-band audio.
+                display
+                    .input_peak
+                    .set(Some(crate::spectrum::input_peak(samples)));
+            }
             // Keep the small waveform at its original time span; the FFT uses
             // the longer snapshot for enough resolution to distinguish FT8 tones.
             draw(
@@ -213,12 +223,15 @@ struct WorkerUpdate {
     capture_end_ms: f64,
     received_seconds: f64,
     next_attempt_utc_ms: f64,
+    #[serde(default)]
+    completed_slot_utc_ms: Option<f64>,
     decodes: Vec<Row>,
 }
 
 #[derive(Deserialize)]
 struct WorkerEvent {
     kind: String,
+    peak: Option<f32>,
     error: Option<String>,
     update: Option<WorkerUpdate>,
     decode: Option<Row>,
@@ -262,6 +275,8 @@ pub fn App() -> impl IntoView {
     let (floor_db, set_floor_db) = signal(-100.0_f32);
     let (automatic, set_automatic) = signal(true);
     let (actual_floor, set_actual_floor) = signal(-100.0_f32);
+    let (input_peak, set_input_peak) = signal(None::<f32>);
+    let continuous_peak = RwSignal::new(false);
     let (waterfall_clock, set_waterfall_clock) = signal(None::<(f64, f64)>);
     let (open_frequency, set_open_frequency) = signal(None::<(f64, f32)>);
     let (hovered, set_hovered) = signal(None::<Row>);
@@ -287,6 +302,7 @@ pub fn App() -> impl IntoView {
     let recovery_lag = RwSignal::new(None::<f64>);
     let (status, set_status) =
         signal("Ready. Start listening to allow microphone access.".to_owned());
+    let (receive_error, set_receive_error) = signal(None::<String>);
     let (clock, set_clock) = signal(utc(js_sys::Date::now()));
     let (capture_start, set_capture_start) = signal("—".to_owned());
     let (capture_end, set_capture_end) = signal("—".to_owned());
@@ -298,6 +314,8 @@ pub fn App() -> impl IntoView {
     let contact_queue = RwSignal::new(queue_state);
     let playing = RwSignal::new(false);
     let display = DisplaySignals {
+        input_peak: set_input_peak,
+        continuous_peak,
         floor: floor_db,
         playing,
         queue: contact_queue,
@@ -307,8 +325,19 @@ pub fn App() -> impl IntoView {
         open_frequency: set_open_frequency,
     };
 
-    let contacted = RwSignal::new(Vec::<String>::new());
+    let contacted = RwSignal::new(Vec::<crate::contact_log::CompletedContact>::new());
     let contact_history_ready = RwSignal::new(false);
+    let (saved_days, saved_error) = crate::contact_log_ui::saved_exclusion();
+    let exclusion_days = RwSignal::new(saved_days);
+    let exclusion_error = RwSignal::new(saved_error);
+    let wall_clock_ms = RwSignal::new(js_sys::Date::now());
+    let exclusion_cutoff = Signal::derive(move || {
+        crate::contact_log::exclusion_since(exclusion_days.get(), wall_clock_ms.get())
+    });
+    let save_exclusion = move |days| {
+        exclusion_days.set(days);
+        exclusion_error.set(crate::contact_log_ui::save_exclusion_days(days));
+    };
     // Deliberately session-only: never restore or save this opt-in.
     let auto_add_cq = RwSignal::new(false);
     let my_grid = RwSignal::new(crate::transmit_ui::saved_grid());
@@ -346,6 +375,7 @@ pub fn App() -> impl IntoView {
                         }),
                         t.now_ms,
                         calls,
+                        exclusion_cutoff.get_untracked(),
                         &my_call.get_untracked(),
                     )
                 });
@@ -432,7 +462,8 @@ pub fn App() -> impl IntoView {
     };
     // Owner disposal drops the interval and cancels the clock updates.
     let _clock_timer = StoredValue::new_local(Interval::new(1000, move || {
-        set_clock.set(utc(js_sys::Date::now()));
+        wall_clock_ms.set(js_sys::Date::now());
+        set_clock.set(utc(wall_clock_ms.get_untracked()));
     }));
     let monitor = Rc::new(RefCell::new(Monitor::default()));
     let cleanup = StoredValue::new_local(monitor.clone());
@@ -546,6 +577,7 @@ pub fn App() -> impl IntoView {
         };
         start_monitor.borrow_mut().stop();
         start_monitor.borrow_mut().failure = None;
+        set_receive_error.set(None);
         let generation = start_monitor.borrow().generation;
         let monitor = start_monitor.clone();
         let token = Rc::new(audio::Cancellation::new());
@@ -560,11 +592,16 @@ pub fn App() -> impl IntoView {
         set_decode_started.set(String::new());
         set_rows.set(Vec::new());
         set_conversations.set(Conversations::default());
-        contact_queue.update(|q| q.reset_observations());
+        contact_queue.update(|q| {
+            q.reset_observations();
+            q.require_receive_progress();
+        });
         set_hovered_contact.set(None);
         set_focused_contact.set(None);
         set_hovered.set(None);
         set_waterfall_clock.set(None);
+        set_input_peak.set(None);
+        continuous_peak.set(false);
         set_open_frequency.set(None);
         set_capture_start.set("—".into());
         set_capture_end.set("—".into());
@@ -582,7 +619,12 @@ pub fn App() -> impl IntoView {
             let Ok(event) = serde_json::from_str::<WorkerEvent>(&json) else {
                 return;
             };
+            if let Some(peak) = event.peak.filter(|p| p.is_finite() && *p >= 0.0) {
+                continuous_peak.set(true);
+                set_input_peak.set(Some(peak));
+            }
             if let Some(error) = event.error {
+                set_receive_error.set(Some(error.clone()));
                 monitor.borrow_mut().failure = Some(error);
             }
             if let Some(decodes) = event.decodes {
@@ -611,6 +653,9 @@ pub fn App() -> impl IntoView {
                     )
                 });
                 ingest(update.decodes, Some(update.capture_end_ms));
+                if let Some(slot) = update.completed_slot_utc_ms {
+                    contact_queue.update(|q| q.receive_slot_completed(slot));
+                }
             }
             match event.kind.as_str() {
                 "decode-started" | "decode-completed" => {
@@ -757,10 +802,23 @@ pub fn App() -> impl IntoView {
                 <p class="clock">"UTC " {move || clock.get()}</p>
             </div>
             </div>
+            <Show when=move || receive_error.get().is_some()>
+                <p class="receive-error" role="alert">"Listening interrupted: "{move || receive_error.get().unwrap_or_default()}</p>
+            </Show>
             <div id="active-panel" class="app-panel" role="tabpanel" tabindex="0" aria-labelledby=move || tab.get().id()>
             <crate::radio::RadioPanel control=radio_control visible=Signal::derive(move || tab.get() == Tab::Radio) />
             <div class="station-workspace" class:contact-layout=move || stations_visible.get() class:map-layout=move || tab.get() == Tab::Map>
             <section class="monitor spectrum-panel" aria-label="Audio input monitor" hidden=move || !spectrum_visible.get()>
+                <div class="input-level" class:clipping=move || input_peak.get().is_some_and(|p| p >= 1.0)
+                    title="Maximum absolute input sample before filtering or resampling. Uses quarter-second capture peaks, or live waveform snapshots when capture peak updates are unavailable. Keep below 1. Reduce input gain if clipping.">
+                    <label for="input-peak">"Input peak"</label>
+                    <meter id="input-peak" min="0" max="1" prop:value=move || input_peak.get().unwrap_or(0.0).min(1.0)></meter>
+                    <span class="input-peak-value">{move || input_peak.get().map_or_else(|| "— / 1 · Waiting for audio".to_owned(), |peak| {
+                        // Avoid rounding a sub-full-scale value up to the clipping threshold.
+                        let shown = (peak.min(1.0) * 1000.0).floor() / 1000.0;
+                        format!("{shown:.3} / 1{}", if peak >= 1.0 { " · Clipping — reduce input gain" } else { "" })
+                    })}</span>
+                </div>
                 <div class="decode-activity" class:decoding=move || decoding.get()>
                     <span class="decode-spinner" aria-hidden="true"></span>
                     <span role="status">{move || decode_activity.get()}</span>
@@ -893,7 +951,7 @@ pub fn App() -> impl IntoView {
             <Show when=move || matches!(tab.get(), Tab::Stations | Tab::Map)>
             <crate::contact_map::ContactMap conversations=conversations queue=contact_queue grid=my_grid mine=my_call />
             </Show>
-            <crate::transmit_ui::StationsToContact visible=stations_visible configuration=configuration_visible queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running open_frequency=open_frequency playing=playing />
+            <crate::transmit_ui::StationsToContact visible=stations_visible configuration=configuration_visible queue=contact_queue mine=my_call grid=my_grid radio=radio_control running=running receive_status=status open_frequency=open_frequency playing=playing />
             </div>
             <Show when=move || tab.get() == Tab::Conversations>
             <section class="results conversation-board" aria-label="FT8 conversations">
@@ -902,7 +960,21 @@ pub fn App() -> impl IntoView {
                     <button class="secondary" disabled=move || !contact_history_ready.get() on:click=move |_| add_cqs(None)>"Add all CQ stations"</button>
                     <label><input type="checkbox" prop:checked=move || auto_add_cq.get()
                         on:change=move |event| auto_add_cq.set(event_target_checked(&event)) />" Automatically add new CQ stations"</label>
-                    <span>"Previously contacted stations are excluded. Auto-add starts off on every page load."</span>
+                    <span>"Auto-add starts off on every page load."</span>
+                </div>
+                <div class="card-sort" aria-label="Completed contact exclusion">
+                    <label for="contact-exclusion">"Exclude logged completed contacts "</label>
+                    <select id="contact-exclusion" prop:value=move || match exclusion_days.get() { None => "always", Some(0) => "off", Some(_) => "days" }
+                        on:change=move |ev| match event_target_value(&ev).as_str() { "always" => save_exclusion(None), "off" => save_exclusion(Some(0)), "days" => save_exclusion(Some(7)), _ => {} }>
+                        <option value="always">"Always"</option><option value="days">"For a number of days"</option><option value="off">"Off"</option>
+                    </select>
+                    <Show when=move || exclusion_days.get().is_some_and(|d| d > 0)>
+                        <label for="contact-exclusion-days">"Days since last completed contact "</label>
+                        <input id="contact-exclusion-days" type="number" min="1" max="36500" step="1" prop:value=move || exclusion_days.get().unwrap_or(7)
+                            on:change=move |ev| { match event_target_value(&ev).parse::<u32>() { Ok(days) if (1..=36500).contains(&days) => save_exclusion(Some(days)), _ => exclusion_error.set("Enter a whole number of days from 1 to 36500.".into()) } } />
+                    </Show>
+                    <span>"Saved for this browser/site. Uses the latest completed exchange in the local log. Applies to bulk and automatic CQ additions; selecting a card manually overrides exclusion."</span>
+                    <span role="status" class="error">{move || exclusion_error.get()}</span>
                 </div>
                 <div class="card-sort" aria-label="Sort conversations">
                     <span>"Sort once:"</span>
@@ -931,9 +1003,10 @@ pub fn App() -> impl IntoView {
                             t.items.iter().find(|c| c.id == id).cloned()).unwrap_or_else(|| initial.clone()));
                         let status = Signal::derive(move || contact.get().status(conversations.with(|t| t.now_ms)));
                         let previously_contacted = Signal::derive(move || contact.with(|c| {
-                            let matches = |call: &str| c.caller == call || c.partner.as_deref() == Some(call);
-                            contacted.with(|calls| calls.iter().any(|call| matches(call)))
-                                || contact_queue.with(|q| q.was_contacted(&c.caller, &[]) || c.partner.as_ref().is_some_and(|p| q.was_contacted(p, &[])))
+                            contacted.with(|calls| contact_queue.with(|q| {
+                                q.was_contacted(&c.caller, calls, exclusion_cutoff.get())
+                                    || c.partner.as_ref().is_some_and(|p| q.was_contacted(p, calls, exclusion_cutoff.get()))
+                            }))
                         }));
                         view! {
                             <article class="conversation" tabindex="0" role="button" data-conversation-id=id
@@ -951,6 +1024,7 @@ pub fn App() -> impl IntoView {
                                     let target = if c.caller == my_call.get_untracked() { c.partner.clone().unwrap_or(c.caller.clone()) } else { c.caller.clone() };
                                     contact_queue.update(|q| {
                                         q.add(target.clone());
+                                        q.remember_conversation(&c);
                                         if let Some(s) = q.items.iter_mut().find(|s| s.call == target) { s.location = c.locations.get(&target).cloned(); }
                                         q.to_front(&target);
                                         rows.with_untracked(|rows| { let mut sorted: Vec<_> = rows.iter().collect(); sorted.sort_by(|a,b| a.start_utc_ms.total_cmp(&b.start_utc_ms)); for r in sorted { q.hear(&my_call.get_untracked(), r.start_utc_ms, &r.message, &r.payload, r.snr_db, r.frequency_hz); q.record_arrival(r.start_utc_ms, &r.message, r.received_at_ms); } });

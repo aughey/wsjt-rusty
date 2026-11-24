@@ -50,6 +50,7 @@ With Playwright and fake-indexeddb installed on NODE_PATH:
 ```sh
 node --test crates/web/tests/contact-log.cjs
 node crates/web/tests/contact-log-browser.cjs http://127.0.0.1:8088
+node crates/web/tests/recontact-browser.cjs http://127.0.0.1:8088
 node crates/web/tests/contact-map-browser.cjs http://127.0.0.1:8088
 ```
 
@@ -63,3 +64,17 @@ Conversations offers **Add all CQ stations** and **Automatically add new CQ stat
 Both exclude previously completed contacts, our own station, queued stations and
 stale or ongoing exchanges. Auto-add applies only to newly decoded CQs, starts
 off on every page load and is never saved. Adding stations does not arm transmit.
+
+The Conversations page saves **Exclude logged completed contacts** per browser/site:
+**Always** (the existing default), **For a number of days** (initially 7), or **Off**.
+The interval is measured in elapsed 24-hour days from the latest completed log
+record's end time; a station becomes eligible exactly when that interval expires.
+The database summary queries all completed records, independent of log pagination,
+and is loaded before bulk or automatic additions are allowed, including after reload.
+Incomplete attempts and the bounded recent-session cache do not establish a prior
+contact. Pending completed log writes also exclude the station until saved, so a
+storage failure cannot immediately cause a duplicate. Restoring preferences never
+arms transmit. Invalid settings and storage failures are reported on Conversations.
+The Contacted card treatment follows the selected interval; manually selecting a
+card explicitly overrides exclusion. Changing the interval does not remove stations
+already queued or cancel an active exchange.
