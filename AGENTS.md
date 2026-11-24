@@ -68,6 +68,11 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
   slot and a CQ frame end within five seconds of the intended TX boundary; decode
   arrival never refreshes CQ age. Selection is pure and does not consume a CQ.
   See `crates/conversations/README.md` for independent build/test commands.
+- `state-logic` (`crates/state-logic`): generic procedural async QSO logic.
+  `contact_stations` selects a CQ and awaits `finish_qso`; exchange progress and
+  retry budgets live on the async stack. `Conversation` supplies validated live
+  replies; `Control` supplies timing, cancel-safe transmit and logging. No runtime
+  or protocol dependencies. Browser/native adapters are not integrated yet.
 - `wsjt-dsp` (`crates/dsp`): reusable signal processing, currently windowed-sinc
   downsampling to any equal or lower nonzero sample rate, with batch and stateful
   streaming APIs. No protocol or file I/O dependencies.
