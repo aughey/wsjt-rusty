@@ -56,7 +56,7 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
 - `ft8-conversations` (`crates/conversations`): standalone receive-only FT8 conversation
   interpretation and payload-aware message classification. Standard library only; no
   dependencies or dev-dependencies. `Conversations` is the entry point. Retain decoded
-  grid text here; coordinates, distance sorting and colors stay in the web adapter.
+  grid text here; coordinates, distance sorting and colors stay in the shared receiver adapter.
   `Conversation::decision()` in `src/decision.rs` returns received-stage flags and
   the expected next step/sender/recipient without local station identity or timing.
   `manager::decide` owns slot turns, receive-readiness, retry/attempt limits and
@@ -84,11 +84,21 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
   depend on command-line or browser presentation.
 - `wsjt-receiver` (`crates/receiver`): shared framework-independent receive-session
   scheduling/UTC mapping, spectrum/level/color processing, annotation geometry,
-  geographic/category helpers, conversation adapter and bounded native history.
+  geographic/category helpers, conversation adapter, station queue, bounded attempt
+  evidence, occupancy estimates and native history.
   Browser modules re-export these implementations; keep devices and UI frameworks out.
-- `wsjt-native` (`crates/native`): egui receive-only desktop UI and CPAL input,
+- `wsjt-log` (`crates/log`): headless shared contact records, validation, ADIF/UTC
+  formatting and versioned SQL store over `ContactStore`/`Database` traits.
+  Keep UI/device/filesystem ownership outside; acknowledge only durable commits.
+- `wsjt-log-sqlite` (`crates/log-sqlite`): native system-SQLite adapter. Browser
+  sql.js implements the same database trait; retain schema-v1 compatibility.
+- `wsjt-native` (`crates/native`): egui desktop UI, native SQLite log, CPAL input/output, serialized native
+  IC-718 control, explicit TX authorization and saved form preferences,
   with independent native slot/recovery threads and aggregate 60-second PCM credit.
-  Spectrum, decoded messages and conversations reuse `wsjt-receiver`; see `docs/native.md`.
+  Spectrum, decoded messages, conversations and station contacting reuse
+  `wsjt-receiver`; see `docs/native.md`. Keep log/map out of the native UI for now.
+  Preserve exact output selection, Stop/minimize/error disarm, PTT deadlines,
+  startup cancellation, watchdogs and serialized per-port transactions.
 - `wsjt-web` (`crates/web`): browser-only Leptos CSR shell, built with Trunk.
   Owns continuous AudioWorklet microphone capture, waveform/FFT waterfall, UTC
   session timing and separate slot/recovery WASM workers using `Ft8Decoder`/`AudioStream`.
@@ -324,10 +334,20 @@ An exchange remains an attempt until a validated partner report or later-stage
 message is received. Before then, fresh CQs may replace it in queue priority
 order after successful initial audio; local audio and partner locator replies
 do not earn exclusive priority. Keep the replaced station queued and archive its
-attempt log. Only established QSOs are pinned ahead of queue sorting.
+attempt log. A fresh validated partner report can resume a recently CQ-replaced
+attempt ahead of an unestablished call, retaining its original log ID and budgets;
+never interrupt an established QSO. Conflicting resumable replies follow queue
+priority. Record bounded late partner evidence even when it cannot resume TX;
+stale decode arrival never refreshes eligibility. Stop, removal, expiry and move
+to back clear resumption state. Only established QSOs are pinned ahead of queue sorting.
 Initial calls use
-the immediately following UTC slot, replies advance only on ordinary payloads
-addressed from the partner to our station. Allow four initial-call transmissions
+the immediately following UTC slot; replies advance only on ordinary payloads
+addressed from the partner to our station.
+New-station selection opens only 200 ms before the nominal TX boundary. After
+successful audio, preserve the entire partner receive turn; opposite-parity CQs
+must not replace the call before our next TX turn. Revalidate late evidence before
+keying/audio; preparing a same-station reply does not commit a new target.
+Allow four initial-call transmissions
 without a response, then end the active attempt and move the station to the back
 after the final reply window. Later stages allow three transmissions. Track and
 display successful initial-call audio counts per queued station, resetting on
@@ -393,6 +413,14 @@ only for transmit. Packing/coding/waveforms remain in the headless FT8 crate.
    Keep this guide current when architectural contracts change.
 
 ## Validation and established baselines
+
+`.github/workflows/native.yml` builds/tests Windows x86-64, Linux x86-64,
+macOS ARM64/x86-64 and Raspberry Pi 4 ARM64. Linux uses the Bookworm container
+in `scripts/ci-native-linux.sh` to retain a glibc 2.36 baseline. Do not enable
+`target-cpu=native` on the hosted ARM runner: Pi 4 requires baseline ARMv8.
+`scripts/package-native.py` packages binaries, licenses, guides and source IDs.
+Only successful full matrices publish: main updates `native-latest`, v* tags
+publish versioned GitHub Releases, and PRs upload artifacts without release access.
 
 Use release builds for DSP verification and timing:
 

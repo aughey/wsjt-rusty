@@ -1,7 +1,11 @@
 use crate::runtime::{self, Event, Session, WIDTH};
 use cpal::traits::DeviceTrait;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Vec2};
-use std::{collections::VecDeque, path::Path, time::Duration};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    time::{Duration, Instant},
+};
 use wsjt_receiver::{
     annotations,
     geography::{self, CardSort},
@@ -18,9 +22,13 @@ const HEIGHT: usize = 600;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
+    Stations,
     Spectrum,
     Messages,
     Conversations,
+    Radio,
+    Configuration,
+    Log,
 }
 
 pub struct App {
@@ -45,7 +53,12 @@ pub struct App {
     progress: [f64; 2],
     durations: [f64; 2],
     origin: Option<f64>,
-    grid: String,
+    stations: crate::stations::Stations,
+    receive_gate: spectrum::ReceiveSnapshotGate,
+    last_capture: (u64, Instant),
+    was_minimized: bool,
+    closing: bool,
+    discard_unsaved: bool,
 }
 
 impl App {
@@ -59,7 +72,7 @@ impl App {
         let devices = runtime::devices();
         let error = devices.as_ref().err().cloned();
         Self {
-            tab: Tab::Spectrum,
+            tab: Tab::Stations,
             devices: devices.unwrap_or_default(),
             selected: 0,
             wav: wav.unwrap_or_default(),
@@ -80,11 +93,17 @@ impl App {
             progress: [0.0; 2],
             durations: [0.0; 2],
             origin: None,
-            grid: String::new(),
+            stations: crate::stations::Stations::new(),
+            receive_gate: spectrum::ReceiveSnapshotGate::default(),
+            last_capture: (0, Instant::now()),
+            was_minimized: false,
+            closing: false,
+            discard_unsaved: false,
         }
     }
 
     fn start(&mut self) {
+        self.stations.reset();
         let result = if self.wav.trim().is_empty() {
             self.devices
                 .get(self.selected)
@@ -96,6 +115,7 @@ impl App {
         match result {
             Ok(session) => {
                 self.session = Some(session);
+                self.last_capture = (0, Instant::now());
                 self.stopping = false;
                 self.error = None;
                 self.history = History::default();
@@ -112,6 +132,14 @@ impl App {
         }
     }
 
+    fn ingest(&mut self, processed: f64, decodes: Vec<wsjt_receiver::receiver::TimedDecode>) {
+        let arrival = runtime::utc_ms();
+        let incoming = self.history.ingest_at(processed, arrival, decodes);
+        for row in &incoming.fresh {
+            self.stations.hear(row, Some(arrival));
+        }
+    }
+
     fn poll(&mut self) {
         let events: Vec<_> = self
             .session
@@ -121,10 +149,12 @@ impl App {
         for event in events {
             match event {
                 Event::Partial(decode) => {
-                    self.history
-                        .ingest(self.progress[0].min(self.progress[1]), vec![decode]);
+                    self.ingest(self.progress[0].min(self.progress[1]), vec![decode]);
                 }
                 Event::Decoded(role, update, duration) => {
+                    if let Some(slot) = update.completed_slot_utc_ms {
+                        self.stations.queue.receive_slot_completed(slot);
+                    }
                     let lane = usize::from(role == ReceiveRole::Recovery);
                     self.origin = Some(update.capture_start_ms);
                     self.progress[lane] = update.capture_end_ms;
@@ -134,13 +164,26 @@ impl App {
                     // Age only to the slower processed lane. A busy recovery
                     // search cannot prematurely expire its own pending evidence.
                     let processed = self.progress[0].min(self.progress[1]);
-                    self.history.ingest(processed, update.decodes);
+                    self.ingest(processed, update.decodes);
                 }
                 Event::Spectrum {
                     center_ms,
                     levels,
                     peak,
                 } => {
+                    let receive_only = self.receive_gate.allow(
+                        center_ms,
+                        spectrum::FFT_SIZE as f64
+                            / self.session.as_ref().map_or(12000.0, |s| s.rate as f64)
+                            * 1000.0,
+                        self.stations.playing,
+                    );
+                    self.stations.spectrum(center_ms, &levels, receive_only);
+                    let levels = if receive_only {
+                        levels
+                    } else {
+                        vec![-160.0; WIDTH]
+                    };
                     self.floor = self.scale.floor(&levels, self.manual_floor, self.auto);
                     self.rows.push_front(
                         levels
@@ -158,6 +201,8 @@ impl App {
                     self.dirty = true;
                 }
                 Event::Error(error) => {
+                    self.stations
+                        .stop("Receive input failed; contacting disarmed.");
                     self.error = Some(error);
                     self.stopping = true;
                     if let Some(session) = &mut self.session {
@@ -165,6 +210,7 @@ impl App {
                     }
                 }
                 Event::Finished => {
+                    self.stations.stop("Receive stopped; contacting disarmed.");
                     self.session = None;
                     self.stopping = false;
                 }
@@ -174,6 +220,8 @@ impl App {
             && session.failed()
         {
             session.stop();
+            self.stations
+                .stop("Receive transport failed; contacting disarmed.");
             self.stopping = true;
             self.error
                 .get_or_insert_with(|| "Receive transport failed; input stopped.".into());
@@ -202,6 +250,14 @@ impl App {
             });
         });
         ui.add_space(8.0);
+        if self.stations.playing {
+            let pending = self.stations.queue.pending.as_ref();
+            crate::station_visuals::banner(
+                ui,
+                pending.map_or("FT8", |p| p.target.as_str()),
+                pending.map_or("Transmit audio in progress", |p| p.message.as_str()),
+            );
+        }
         ui.horizontal_wrapped(|ui| {
             let busy = self.session.is_some();
             ui.add_enabled_ui(!busy, |ui| {
@@ -248,6 +304,8 @@ impl App {
                 if let Some(session) = &mut self.session {
                     session.stop();
                 }
+                self.stations
+                    .stop("Input stopped by operator; contacting disarmed.");
                 self.stopping = true;
             }
             if let Some(session) = &self.session {
@@ -266,11 +324,15 @@ impl App {
             ui.colored_label(Color32::LIGHT_RED, error);
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (tab, name) in [
+                (Tab::Stations, "Stations to contact"),
                 (Tab::Spectrum, "Spectrum analyzer"),
                 (Tab::Messages, "Decoded messages"),
                 (Tab::Conversations, "Conversations"),
+                (Tab::Radio, "Radio control"),
+                (Tab::Configuration, "Contact configuration"),
+                (Tab::Log, "Log"),
             ] {
                 ui.selectable_value(&mut self.tab, tab, name);
             }
@@ -490,13 +552,19 @@ impl App {
                 ("Distance", CardSort::Distance),
             ] {
                 if ui.button(name).clicked() {
-                    self.history.conversations.sort(by, &self.grid);
+                    self.history
+                        .conversations
+                        .sort(by, &self.stations.prefs.grid);
                 }
             }
             ui.label("My grid");
-            ui.add(egui::TextEdit::singleline(&mut self.grid).desired_width(65.0));
+            ui.add_enabled(
+                !self.stations.configuration_locked(),
+                egui::TextEdit::singleline(&mut self.stations.prefs.grid).desired_width(65.0),
+            );
         });
         ui.label(RichText::new("Received evidence and expected stages · inferred context is labeled · sign-off is not QSO confirmation").color(MUTED).small());
+        let mut selected = None;
         let tracker = &self.history.conversations;
         if tracker.items.is_empty() {
             empty(
@@ -518,83 +586,158 @@ impl App {
                 .show(ui, |ui| {
                     for slot in 0..=(max_slot / columns + 1) * columns - 1 {
                         ui.allocate_ui_with_layout(
-                            Vec2::new(280.0, 230.0),
+                            Vec2::new(280.0, 254.0),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                ui.set_min_size(Vec2::new(280.0, 230.0));
-                                ui.set_max_size(Vec2::new(280.0, 230.0));
+                                ui.set_min_size(Vec2::new(280.0, 254.0));
+                                ui.set_max_size(Vec2::new(280.0, 254.0));
                                 if let Some(c) =
                                     tracker.items.iter().find(|c| c.display_slot == slot)
                                 {
-                                    let tint = color(c.color(tracker.now_ms));
-                                    let frame = egui::Frame::new()
-                                        .fill(Color32::from_rgb(18, 31, 49))
-                                        .stroke(Stroke::new(1.0_f32, tint))
-                                        .inner_margin(10.0)
-                                        .corner_radius(5.0)
-                                        .show(ui, |ui| {
-                                            ui.set_width(258.0);
-                                            ui.label(RichText::new(c.label()).strong().color(tint));
-                                            ui.label(
-                                                RichText::new(c.status(tracker.now_ms))
-                                                    .small()
-                                                    .color(tint),
-                                            );
-                                            for stage in c.exchange_slots(tracker.now_ms) {
-                                                let received = stage.evidence.as_ref();
-                                                let text = received
-                                                    .map(|e| e.latest.message.as_str())
-                                                    .unwrap_or(stage.state.label());
-                                                let prefix =
-                                                    if received.is_some() { "●" } else { "▧" };
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(format!(
-                                                            "{prefix} {:8} {text}",
-                                                            stage.step.short_label()
-                                                        ))
-                                                        .monospace()
-                                                        .size(11.0)
-                                                        .color(if received.is_some() {
+                                    let contacted = self.stations.was_contacted(&c.caller);
+                                    let tint = if contacted {
+                                        Color32::GRAY
+                                    } else {
+                                        color(c.color(tracker.now_ms))
+                                    };
+                                    let is_target = |target: &str| {
+                                        c.caller == target || c.partner.as_deref() == Some(target)
+                                    };
+                                    let active = self
+                                        .stations
+                                        .queue
+                                        .active
+                                        .as_ref()
+                                        .is_some_and(|a| is_target(&a.contact.target));
+                                    let transmitting = self.stations.playing
+                                        && self
+                                            .stations
+                                            .queue
+                                            .pending
+                                            .as_ref()
+                                            .is_some_and(|p| is_target(&p.target));
+                                    let frame = crate::station_visuals::card_frame(
+                                        active,
+                                        transmitting,
+                                        false,
+                                        tint,
+                                        ui.input(|i| i.time),
+                                    )
+                                    .inner_margin(10.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(258.0);
+                                        ui.label(RichText::new(c.label()).strong().color(tint));
+                                        ui.label(
+                                            RichText::new(if transmitting {
+                                                format!(
+                                                    "TX AUDIO ON · {}",
+                                                    c.status(tracker.now_ms)
+                                                )
+                                            } else if contacted {
+                                                format!("Contacted · {}", c.status(tracker.now_ms))
+                                            } else {
+                                                c.status(tracker.now_ms).into()
+                                            })
+                                            .small()
+                                            .color(
+                                                if transmitting {
+                                                    crate::station_visuals::AMBER
+                                                } else {
+                                                    tint
+                                                },
+                                            ),
+                                        );
+                                        let grid = c
+                                            .grids
+                                            .get(&c.caller)
+                                            .or_else(|| c.grids.values().next())
+                                            .map(|(_, grid)| grid.as_str())
+                                            .unwrap_or("unknown");
+                                        let snr = c
+                                            .messages
+                                            .last()
+                                            .filter(|heard| heard.snr_db.is_finite())
+                                            .map(|heard| format!("{:+.1} dB SNR", heard.snr_db))
+                                            .unwrap_or_else(|| "unknown SNR".into());
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(format!("Grid {grid} · RX {snr}"))
+                                                    .monospace()
+                                                    .strong(),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(
+                                            c.grids
+                                                .iter()
+                                                .map(|(call, (_, grid))| format!("{call}: {grid}"))
+                                                .collect::<Vec<_>>()
+                                                .join("\n"),
+                                        );
+                                        for stage in c.exchange_slots(tracker.now_ms) {
+                                            let received = stage.evidence.as_ref();
+                                            let text = received
+                                                .map(|e| e.latest.message.as_str())
+                                                .unwrap_or(stage.state.label());
+                                            let prefix =
+                                                if received.is_some() { "●" } else { "▧" };
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "{prefix} {:8} {text}",
+                                                        stage.step.short_label()
+                                                    ))
+                                                    .monospace()
+                                                    .size(11.0)
+                                                    .color(if received.is_some() {
+                                                        if c.status(tracker.now_ms) == "Stale" {
                                                             tint
                                                         } else {
-                                                            MUTED
-                                                        }),
-                                                    )
-                                                    .truncate(),
+                                                            crate::station_visuals::stage_color(
+                                                                &stage,
+                                                            )
+                                                        }
+                                                    } else {
+                                                        MUTED
+                                                    }),
                                                 )
-                                                .on_hover_text(format!(
-                                                    "{} · {}\n{}\nDirection: {}",
-                                                    stage.step.label(),
-                                                    stage.state.label(),
-                                                    text,
-                                                    stage.direction
-                                                ));
-                                            }
-                                            ui.label(
-                                                RichText::new(geography::description(
-                                                    c.location(),
-                                                    &self.grid,
-                                                ))
-                                                .small()
-                                                .color(MUTED),
-                                            );
-                                            ui.label(
-                                                RichText::new(if c.inferred {
-                                                    "Late entry / inferred context"
-                                                } else {
-                                                    "Opening heard"
-                                                })
-                                                .small()
-                                                .color(MUTED),
-                                            );
-                                        })
-                                        .response;
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(format!(
+                                                "{} · {}\n{}\nDirection: {}",
+                                                stage.step.label(),
+                                                stage.state.label(),
+                                                text,
+                                                stage.direction
+                                            ));
+                                        }
+                                        ui.label(
+                                            RichText::new(geography::description(
+                                                c.location(),
+                                                &self.stations.prefs.grid,
+                                            ))
+                                            .small()
+                                            .color(MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new(if c.inferred {
+                                                "Late entry / inferred context"
+                                            } else {
+                                                "Opening heard"
+                                            })
+                                            .small()
+                                            .color(MUTED),
+                                        );
+                                    })
+                                    .response;
                                     let response = ui.interact(
                                         frame.rect,
                                         ui.id().with(("conversation", c.id)),
                                         egui::Sense::click(),
                                     );
+                                    if response.clicked() {
+                                        selected = Some(c.clone());
+                                    }
                                     details(
                                         ui,
                                         response,
@@ -623,12 +766,79 @@ impl App {
                     }
                 });
         });
+        if let Some(conversation) = selected {
+            self.stations.select(&conversation, &self.history);
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.stations
+            .stop("Application closed; contacting disarmed.");
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.closing {
+            self.closing = true;
+            self.stations
+                .stop("Application closed; contacting disarmed.");
+            if let Some(session) = &mut self.session {
+                session.stop();
+                self.stopping = true;
+            }
+        }
         self.poll();
+        if let Some(session) = &mut self.session {
+            let frames = session.captured_frames();
+            if frames != self.last_capture.0 {
+                self.last_capture = (frames, Instant::now());
+            }
+            if !self.stopping
+                && self.wav.trim().is_empty()
+                && self.last_capture.1.elapsed() > Duration::from_secs(2)
+            {
+                self.stations
+                    .stop("Audio input stalled; contacting disarmed.");
+                session.stop();
+                self.stopping = true;
+                self.error =
+                    Some("Audio input stalled; stopped rather than joining a capture gap.".into());
+            }
+        }
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if minimized && !self.was_minimized {
+            self.stations.stop("Window minimized; contacting disarmed.");
+        }
+        self.was_minimized = minimized;
+        self.stations.tick(
+            self.session.is_some() && !self.stopping && !self.closing,
+            !self.wav.trim().is_empty(),
+            &self.history,
+        );
+        if self.closing {
+            if self.discard_unsaved
+                || (!self.stations.log.busy && self.stations.queue.log_pending.is_empty())
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.stations.log.failed {
+                    egui::Window::new("Unsaved contact log").collapsible(false).show(ctx,|ui|{
+                        ui.label("Log updates could not be saved. The app remains open to preserve them.");
+                        ui.label(&self.stations.log.status);
+                        if ui.button("Retry saving").clicked(){self.stations.log.retry();}
+                        if ui.button("Keep app open").clicked(){self.closing=false;}
+                        if ui.button("Close without saving unsaved updates").clicked(){self.discard_unsaved=true;}
+                    });
+                }
+            }
+        }
+        if let Some(session) = &self.session {
+            session.set_priorities(self.stations.priorities());
+        }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
             self.header(ui);
@@ -636,9 +846,15 @@ impl eframe::App for App {
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                let elapsed = self.origin.map_or(0.0, |o| {
-                    (self.progress[0].max(self.progress[1]) - o) / 1000.0
-                });
+                let elapsed = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.captured_frames() as f64 / s.rate as f64)
+                    .unwrap_or_else(|| {
+                        self.origin.map_or(0.0, |o| {
+                            (self.progress[0].max(self.progress[1]) - o) / 1000.0
+                        })
+                    });
                 ui.label(format!("Captured {:.1}s", elapsed.max(0.0)));
                 ui.separator();
                 ui.label(format!("Slot attempt {:.2}s", self.durations[0]));
@@ -649,17 +865,55 @@ impl eframe::App for App {
                     ((self.progress[0] - self.progress[1]) / 1000.0).max(0.0)
                 ));
                 ui.separator();
-                ui.colored_label(MUTED, "Receive only · shared Rust FT8 decoder");
+                ui.colored_label(
+                    MUTED,
+                    if self.stations.armed {
+                        "Contacting enabled · shared Rust FT8"
+                    } else {
+                        "Contacting paused · shared Rust FT8"
+                    },
+                );
+                if self.stations.log.failed || !self.stations.queue.log_pending.is_empty() {
+                    ui.colored_label(
+                        if self.stations.log.failed {
+                            Color32::LIGHT_RED
+                        } else {
+                            MUTED
+                        },
+                        format!(
+                            "Log: {} unsaved updates{}",
+                            self.stations.queue.log_pending.len(),
+                            if self.stations.log.failed {
+                                " · retry on Log"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
+                }
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Stations => self.stations.panel(
+                ui,
+                &self.history,
+                self.session.is_some() && !self.stopping,
+                !self.wav.trim().is_empty(),
+            ),
+            Tab::Radio => self.stations.radio(ui),
+            Tab::Configuration => self.stations.configuration(ui),
+            Tab::Log => self
+                .stations
+                .log
+                .panel(ui, self.stations.queue.log_pending.len()),
             Tab::Spectrum => self.spectrum(ui),
             Tab::Messages => self.messages(ui),
             Tab::Conversations => self.conversations(ui),
         });
-        if self.session.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(50));
+        if self.stations.playing {
+            crate::station_visuals::window_glow(ctx);
         }
+        ctx.request_repaint_after(Duration::from_millis(20));
     }
 }
 
@@ -691,7 +945,7 @@ fn details(ui: &egui::Ui, response: egui::Response, text: String) {
     }
     response.on_hover_text(text);
 }
-fn color(hex: &str) -> Color32 {
+pub(crate) fn color(hex: &str) -> Color32 {
     let rgb = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0xc7d1dc);
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }

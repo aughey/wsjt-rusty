@@ -148,9 +148,9 @@ const { chromium } = require("playwright"),
                 kind: "update",
                 update: {
                   capture_start_ms: base + 5413000,
-                  capture_end_ms: base + ms + 13500,
+                  capture_end_ms: base + ms + 14900,
                   received_seconds: 13.5,
-                  next_attempt_utc_ms: base + ms + 28500,
+                  next_attempt_utc_ms: base + ms + 29900,
                   completed_slot_utc_ms: base + ms,
                   decodes: [],
                 },
@@ -160,6 +160,8 @@ const { chromium } = require("playwright"),
       };
     });
     await page.goto(process.argv[2] || "http://127.0.0.1:8097");
+    // Wait for the WASM shell before querying roles under the frozen test clock.
+    await page.locator(".app-tabs button").first().waitFor();
     const select = async (name) =>
       page.getByRole("tab", { name, exact: true }).click();
     await select("Contact configuration");
@@ -205,69 +207,83 @@ const { chromium } = require("playwright"),
     await page
       .getByRole("button", { name: "Start contacting", exact: true })
       .click();
-    await tick(5444000);
+    await tick(5444900);
     await page.waitForFunction(() => outputs.length === 1);
     assert.match(await page.locator('.contact-policy-decision').innerText(), /Transmit next.*W4VPK N9IOX EM48/);
     assert.equal(await page.locator('.active-conversation').innerText(), 'Attempting contact: W4VPK');
+    const rxMarker = page.locator('.rx-frequency-marker');
+    assert.match(await rxMarker.getAttribute('aria-label'), /Attempting contact with W4VPK; latest received frequency 2621.4 audio Hz/);
+    assert.equal(await rxMarker.locator('span').innerText(), 'RX W4VPK · 2621.4 Hz');
+    // Same-frequency TX/RX labels remain distinct, including on a narrow screen.
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await rxMarker.locator('span').evaluate(el => {
+      const label = el.getBoundingClientRect(), plot = el.closest('.waterfall-plot').getBoundingClientRect();
+      const tx = document.querySelector('.tx-frequency-marker span').getBoundingClientRect();
+      return label.left >= plot.left && label.right <= plot.right && label.top >= tx.bottom;
+    }), true, 'RX label stays inside mobile plot below TX label');
+    await page.screenshot({ path: path.resolve('target/active-contact-mobile.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.screenshot({ path: path.resolve('target/active-contact-desktop.png'), fullPage: true });
     assert.equal(await page.locator('.queued-station.active .station-role').innerText(), 'Contact attempt');
     const history = page.locator('.queued-station.active details');
     await history.getByText('Received conversation history', { exact: true }).click();
     assert.match(await history.innerText(), /CQ W4VPK FM02/);
     await tick(5445600);
     await hear(5445592, "W4VPK N9IOX EM48", -5.1);
-    await tick(5458400);
-    await tick(5474000);
+    await tick(5459900);
+    await tick(5474900);
     assert.equal(
       await count(),
       1,
       "unfinished RX slot must not schedule another locator",
     );
     assert.match(await page.locator('.contact-policy-decision').innerText(), /Listening.*receive slot still decoding/);
-    await hear(5460822, "N9IOX W4VPK -14", -15.7);
+    await page.evaluate(() => emitDecode(5460822, "N9IOX W4VPK -14", -15.7, 2675));
     await tick(5474900);
     await page.waitForFunction(() => outputs.length === 2);
     assert.equal(await page.locator('.active-conversation').innerText(), 'Active conversation: W4VPK');
+    assert.match(await rxMarker.getAttribute('aria-label'), /In QSO with W4VPK; latest received frequency 2675.0 audio Hz/);
+    assert.match(await page.locator('.tx-frequency-marker').getAttribute('aria-label'), /2675.0 audio Hz/, 'normal TX placement continues to follow the station when open-frequency selection is off');
     assert.equal(await page.locator('.queued-station.active .station-role').innerText(), 'Active conversation');
     assert.match(await page.locator('.contact-policy-decision').innerText(), /Transmit next.*W4VPK N9IOX R-16/);
     await tick(5475600);
     await hear(5475562, "W4VPK N9IOX R-16", -3.8);
-    await tick(5488400);
-    await tick(5504000);
+    await tick(5489900);
+    await tick(5504900);
     assert.equal(
       await count(),
-      2,
-      "unresolved RX slot must not schedule stale R-report",
+      3,
+      "established QSO repeats its R-report even without receive-slot completion",
     );
-    await hear(5490827, "N9IOX W4VPK -24", -9.4);
-    await done(5490000);
     await tick(5504900);
     await page.waitForFunction(() => outputs.length === 3);
     await tick(5505600);
-    await hear(5505562, "W4VPK N9IOX R-09", -4.2);
-    await tick(5518400);
+    await hear(5505562, "W4VPK N9IOX R-16", -4.2);
+    await tick(5519900);
     await hear(5520822, "N9IOX W4VPK RR73", -13.2);
-    await tick(5534000);
+    await tick(5534900);
     await page.waitForFunction(() => outputs.length === 4);
     await tick(5535600);
-    await tick(5548400);
+    await tick(5549900);
     await page.waitForFunction(
       () => !document.querySelector('.queued-station[data-station="W4VPK"]'),
     );
+    assert.equal(await rxMarker.count(), 0, 'completion clears the active station band');
     // Recovery delivers a report just 50 ms before an already reserved retry,
     // between interval ticks. The stale locator must never actually play.
-    await tick(5564000);
+    await tick(5564900);
     await hear(5550827, "CQ K1ABC FN42");
     await queue("K1ABC");
     await page
       .getByRole("button", { name: "Start contacting", exact: true })
       .click();
-    await tick(5564100);
+    await tick(5564900);
     await page.waitForFunction(() => outputs.length === 5);
     await tick(5565600);
-    await tick(5578400);
-    await tick(5593900);
+    await tick(5579900);
+    await tick(5594900);
     await done(5580000);
-    await tick(5594000);
+    await tick(5594900);
     await page.waitForFunction(() => outputs.length === 6);
     await page.evaluate(async () => {
       advanceClock(5595450);
@@ -293,34 +309,34 @@ const { chromium } = require("playwright"),
       "superseding must not disarm",
     );
     await done(5610000);
-    await tick(5624000);
+    await tick(5624900);
     await page.waitForFunction(() => outputs.length === 7);
     await tick(5625600);
-    await tick(5638400);
+    await tick(5639900);
     await hear(5640822, "N9IOX K1ABC RR73");
-    await tick(5654000);
+    await tick(5654900);
     await page.waitForFunction(() => outputs.length === 8);
     await tick(5655600);
-    await tick(5668400);
+    await tick(5669900);
     // An unanswered initial call is an attempt, so another fresh CQ can win
     // queue priority before a partner report establishes an exclusive QSO.
     await hear(5670827, "CQ KM4ESU EM55");
     await queue("KM4ESU");
     const startAgain = page.getByRole("button", { name: "Start contacting", exact: true });
     if (await startAgain.count()) await startAgain.click();
-    await tick(5684000);
+    await tick(5684900);
     await page.waitForFunction(() => outputs.length === 9);
     assert.equal(await page.locator('.active-conversation').innerText(), 'Attempting contact: KM4ESU');
     await tick(5685600);
-    await tick(5698400);
+    await tick(5699900);
     await hear(5700827, "CQ N5IH EM20");
     await queue("N5IH");
-    await tick(5714000);
+    await tick(5714900);
     await page.waitForFunction(() => outputs.length === 10);
     assert.equal(await page.locator('.active-conversation').innerText(), 'Attempting contact: N5IH');
     assert.match(await page.locator('.queued-station[data-station="KM4ESU"]').innerText(), /Attempt replaced by fresh CQ/);
     await tick(5715600);
-    await tick(5728400);
+    await tick(5729900);
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await page
       .getByRole("status")
@@ -370,7 +386,7 @@ const { chromium } = require("playwright"),
       [
         "W4VPK N9IOX EM48",
         "W4VPK N9IOX R-16",
-        "W4VPK N9IOX R-09",
+        "W4VPK N9IOX R-16",
         "W4VPK N9IOX 73",
         "K1ABC N9IOX EM48",
         "K1ABC N9IOX R-11",

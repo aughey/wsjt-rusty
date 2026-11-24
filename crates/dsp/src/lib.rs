@@ -1,5 +1,97 @@
 //! General signal processing primitives, independent of file formats and modes.
 
+/// Band-limited batch interpolation for device playback. The same windowed-sinc
+/// kernel as downsampling is used at the input Nyquist limit. Rational phases
+/// cache coefficients; no trigonometry runs per output sample. No device I/O.
+pub fn resample_up(
+    samples: &[f32],
+    input_rate: u32,
+    output_rate: u32,
+) -> Result<Vec<f32>, &'static str> {
+    if input_rate == 0 || output_rate < input_rate || output_rate > 384_000 {
+        return Err("invalid interpolation rates");
+    }
+    if samples.iter().any(|v| !v.is_finite()) {
+        return Err("non-finite interpolation input");
+    }
+    if input_rate == output_rate {
+        return Ok(samples.to_vec());
+    }
+    let gcd = |mut a: u32, mut b: u32| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let divisor = gcd(input_rate, output_rate);
+    let phases = output_rate / divisor;
+    if phases > 4096 {
+        return Err("interpolation ratio requires too many phases");
+    }
+    // The normalized sinc kernel suppresses images above the input passband.
+    let kernels: Vec<Vec<f64>> = (0..phases)
+        .map(|phase| {
+            let frac = phase as f64 / phases as f64;
+            (-32..=32)
+                .map(|j| sinc_weight(j as f64 - frac, 32.0, 0.45))
+                .collect()
+        })
+        .collect();
+    let length = samples.len() as u64 * output_rate as u64 / input_rate as u64;
+    let mut output = Vec::with_capacity(length as usize);
+    for n in 0..length {
+        let position = n * input_rate as u64;
+        let center = (position / output_rate as u64) as i64;
+        let phase = ((position % output_rate as u64) / divisor as u64) as usize;
+        let mut sum = 0.0;
+        let mut weight = 0.0;
+        for (i, &w) in kernels[phase].iter().enumerate() {
+            let index = center + i as i64 - 32;
+            if index >= 0 && index < samples.len() as i64 {
+                sum += samples[index as usize] as f64 * w;
+                weight += w;
+            }
+        }
+        output.push(if weight.abs() > 1e-12 {
+            (sum / weight) as f32
+        } else {
+            0.0
+        });
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod interpolation_tests {
+    use super::*;
+    #[test]
+    fn playback_interpolation_preserves_duration_dc_and_rejects_images() {
+        for rate in [12000, 44100, 48000, 96000] {
+            let dc = resample_up(&[0.25; 1200], 12000, rate).unwrap();
+            assert_eq!(dc.len(), rate as usize / 10);
+            assert!(dc.iter().all(|&v| (v - 0.25).abs() < 1e-6));
+            let tone: Vec<_> = (0..12000)
+                .map(|n| (std::f32::consts::TAU * 1700.0 * n as f32 / 12000.0).sin())
+                .collect();
+            let output = resample_up(&tone, 12000, rate).unwrap();
+            let error = output
+                .iter()
+                .enumerate()
+                .skip(400)
+                .take(output.len() - 800)
+                .map(|(n, &v)| {
+                    (v - (std::f32::consts::TAU * 1700.0 * n as f32 / rate as f32).sin()).powi(2)
+                })
+                .sum::<f32>()
+                / (output.len() - 800) as f32;
+            assert!(error < 1e-6, "{rate}: {error}");
+        }
+        assert!(resample_up(&[], 0, 48000).is_err());
+        assert!(resample_up(&[], 12000, 8000).is_err());
+        assert!(resample_up(&[f32::NAN], 12000, 48000).is_err());
+    }
+}
+
 /// Low-pass resample real samples to an equal or lower sample rate.
 ///
 /// Uses a windowed-sinc filter with a cutoff at 90% of the output Nyquist

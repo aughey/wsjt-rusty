@@ -5,8 +5,8 @@ use std::{
     collections::VecDeque,
     path::Path,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver as Inbox, SyncSender},
     },
     thread,
@@ -67,6 +67,7 @@ struct Fanout {
     events: SyncSender<Event>,
     limit: usize,
     offset: u64,
+    captured: Arc<AtomicU64>,
 }
 impl Fanout {
     fn fail(&self, message: String) {
@@ -97,6 +98,7 @@ impl Fanout {
             }
         }
         self.offset += len as u64;
+        self.captured.store(self.offset, Ordering::Release);
         true
     }
 }
@@ -109,6 +111,8 @@ pub struct Session {
     failed: Arc<AtomicBool>,
     pub events: Inbox<Event>,
     pub rate: u32,
+    priorities: Arc<Mutex<Vec<f32>>>,
+    captured: Arc<AtomicU64>,
 }
 impl Session {
     pub fn live(device: &cpal::Device) -> Result<Self, String> {
@@ -161,6 +165,8 @@ impl Session {
         let (events, inbox) = mpsc::sync_channel(1024);
         let failed = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(AtomicUsize::new(0));
+        let priorities = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::new(AtomicU64::new(0));
         let mut lanes = Vec::new();
         let mut workers = Vec::new();
         for role in [ReceiveRole::Slot, ReceiveRole::Recovery] {
@@ -168,8 +174,9 @@ impl Session {
             lanes.push(tx);
             let events = events.clone();
             let failed = failed.clone();
+            let priorities = priorities.clone();
             workers.push(thread::spawn(move || {
-                let result = decode_lane(rate, role, rx, &events);
+                let result = decode_lane(rate, role, rx, &events, priorities);
                 if let Err(error) = result {
                     failed.store(true, Ordering::Relaxed);
                     let _ = events.send(Event::Error(error));
@@ -196,6 +203,8 @@ impl Session {
                 failed: failed.clone(),
                 events: inbox,
                 rate,
+                priorities,
+                captured: captured.clone(),
             },
             Fanout {
                 lanes,
@@ -204,6 +213,7 @@ impl Session {
                 events,
                 limit: rate as usize * 60,
                 offset: 0,
+                captured,
             },
         )
     }
@@ -211,6 +221,14 @@ impl Session {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.stream.take();
+    }
+    pub fn set_priorities(&self, frequencies: Vec<f32>) {
+        if let Ok(mut current) = self.priorities.lock() {
+            *current = frequencies;
+        }
+    }
+    pub fn captured_frames(&self) -> u64 {
+        self.captured.load(Ordering::Acquire)
     }
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
@@ -227,6 +245,7 @@ fn decode_lane(
     role: ReceiveRole,
     rx: Inbox<Arc<Packet>>,
     events: &SyncSender<Event>,
+    priorities: Arc<Mutex<Vec<f32>>>,
 ) -> Result<(), String> {
     let mut receiver = None;
     for packet in rx {
@@ -240,6 +259,12 @@ fn decode_lane(
             receiver = Some(r);
         }
         let start = Instant::now();
+        if let Ok(frequencies) = priorities.lock() {
+            receiver
+                .as_mut()
+                .unwrap()
+                .set_priority_frequencies(&frequencies);
+        }
         let update = receiver
             .as_mut()
             .unwrap()
@@ -354,6 +379,7 @@ mod tests {
             events,
             limit: 4,
             offset: 0,
+            captured: Arc::new(AtomicU64::new(0)),
         };
         assert!(fanout.push(0.0, vec![0.0; 4]));
         let one = ar.recv().unwrap();

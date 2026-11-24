@@ -862,6 +862,25 @@ pub fn App() -> impl IntoView {
                                 <span>{format!("TX {hz:.1} Hz")}</span>
                             </div>
                         }))}
+                        {move || contact_queue.with(|q| {
+                            let active = q.active.as_ref()?;
+                            let station = q.items.iter().find(|s| s.call == active.contact.target)?;
+                            let hz = station.frequency_hz;
+                            if !hz.is_finite() || hz + 50.0 <= low_hz || hz >= high_hz {
+                                return None;
+                            }
+                            let call = station.call.clone();
+                            let state = if active.contact.is_established() { "In QSO with" } else { "Attempting contact with" };
+                            let left = hz.max(low_hz);
+                            let right = (hz + 50.0).min(high_hz);
+                            Some(view! {
+                                <div class="rx-frequency-marker" class:label-right={hz > (low_hz + high_hz) / 2.0}
+                                    role="img" aria-label=format!("{state} {call}; latest received frequency {hz:.1} audio Hz; 50 Hz bandwidth")
+                                    style=format!("left:{}%;width:{}%", (left-low_hz)/(high_hz-low_hz)*100.0, (right-left)/(high_hz-low_hz)*100.0)>
+                                    <span title=format!("{state} {call} · latest received frequency")>{format!("RX {call} · {hz:.1} Hz")}</span>
+                                </div>
+                            })
+                        })}
                         <Show when=move || spectrum_visible.get()>
                         <div class="decode-overlays" aria-label="Decoded FT8 signals">
                             <For each=move || rows.get()
@@ -919,7 +938,7 @@ pub fn App() -> impl IntoView {
                         </span>
                     }).collect_view()}
                 </div>
-                <p class="spectrum-detail">"Thick outline: station queued · Filled, bright outline: actively contacting · Dashed cyan band: TX frequency"</p>
+                <p class="spectrum-detail">"Thick outline: station queued · Filled, bright outline: actively contacting · Dashed cyan band: TX frequency · Solid amber band: active station’s latest RX frequency"</p>
                 <p class="spectrum-detail">"Horizontal timing guides: solid = expected FT8 start (UTC slot +0.50 s); dashed = end (+13.14 s). Compare signal edges with these lines; hover/focus a decode for its start offset. PTT leads audio by 0.50 s. Device latency and propagation are uncalibrated."</p>
                 <div class="waterfall-settings">
                     <label class="auto-level"><input type="checkbox" prop:checked=move || automatic.get()

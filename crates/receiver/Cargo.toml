@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+wsjt-log.workspace = true
 serde.workspace = true
 rustfft.workspace = true
 wsjt-rusty.workspace = true

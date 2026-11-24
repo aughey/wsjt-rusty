@@ -1,6 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod hardware;
+mod logbook;
+mod output;
+mod preferences;
 mod runtime;
+mod station_visuals;
+mod stations;
 mod ui;
 
 fn main() -> eframe::Result {

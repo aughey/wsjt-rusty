@@ -142,6 +142,9 @@ pub enum PolicyDecision {
 /// Audio starts 500 ms into the nominal slot; reservation leaves time for PTT.
 pub const AUDIO_OFFSET_MS: f64 = 500.0;
 pub const RESERVATION_LEAD_MS: f64 = 1_800.0;
+/// Commit a new station at most 200 ms before the nominal UTC boundary.
+/// Audio starts 500 ms later; this leaves setup time before the PTT lead-in.
+pub const STATION_SELECTION_LEAD_MS: f64 = 700.0;
 pub const RESERVATION_DEADLINE_MS: f64 = 200.0;
 pub const INITIAL_CALL_LIMIT: usize = 4;
 pub const STAGE_TRANSMISSION_LIMIT: usize = 3;
@@ -150,9 +153,42 @@ pub const ATTEMPT_TIMEOUT_MS: f64 = 180_000.0;
 pub const UNANSWERED_PENALTY_MS: f64 = 180_000.0;
 
 impl Attempt<'_> {
+    /// A recently replaced call may reclaim an unestablished attempt on fresh
+    /// addressed partner evidence. The executor supplies only replaced attempts
+    /// with successful audio; this never grants device or operator authorization.
+    pub fn can_resume_replaced(&self, current: Option<Attempt<'_>>, now_ms: f64) -> bool {
+        if !now_ms.is_finite()
+            || current.is_some_and(|a| a.contact.is_established())
+            || !self.contact.is_established()
+            || self.contact.state() == crate::QsoState::Closed
+            || self.end_reason(now_ms).is_some()
+            || self.last_tx_ms.is_none()
+        {
+            return false;
+        }
+        let boundary = (now_ms / SLOT_MS).round() * SLOT_MS;
+        let due = boundary + AUDIO_OFFSET_MS;
+        let slot = (boundary / SLOT_MS).round() as i64 - 1;
+        let age = boundary - (self.contact.latest_ms + 12_640.0);
+        let current_turn = current.and_then(|a| a.last_tx_ms).is_none_or(|last| {
+            due >= last + 2.0 * SLOT_MS && ((due - last) / SLOT_MS).round() as i64 % 2 == 0
+        });
+        current_turn
+            && (due - STATION_SELECTION_LEAD_MS..=due - RESERVATION_DEADLINE_MS).contains(&now_ms)
+            && self.contact.last_directed_slot == Some(slot)
+            && (0.0..=CQ_FRESHNESS_MS).contains(&age)
+            && self
+                .last_tx_ms
+                .is_some_and(|last| self.contact.latest_ms > last)
+    }
+
     pub fn receive_ready(&self, transmit_ms: f64) -> bool {
         if !self.require_receive_progress
             || self.last_tx_ms.is_none()
+            // An established QSO repeats its owed response on the next TX turn
+            // even when silence or a slow full-band search yields no new event.
+            // Late evidence still changes/revokes the executor's reservation.
+            || self.contact.is_established()
             || self.contact.state() == crate::QsoState::SendingFarewell
         {
             return true;
@@ -250,14 +286,6 @@ pub fn decide(
         if let Some(reason) = active.end_reason(now_ms) {
             return PolicyDecision::End(reason);
         }
-        if !active.contact.is_established() && active.last_tx_ms.is_some() {
-            let selected = decide(None, candidates, now_ms, mine, grid, report);
-            if matches!(&selected, PolicyDecision::Start { target, .. }
-                if target != &active.contact.target)
-            {
-                return selected;
-            }
-        }
         let mut due = (active.contact.receive_slot + 1) as f64 * SLOT_MS + AUDIO_OFFSET_MS;
         if let Some(last) = active.last_tx_ms {
             due = due.max(last + 2.0 * SLOT_MS);
@@ -272,6 +300,20 @@ pub fn decide(
         }
         if now_ms < due - RESERVATION_LEAD_MS {
             return PolicyDecision::Listen(ListenReason::OutsideTransmitWindow);
+        }
+        // Preserve the full reply turn after successful audio. A CQ on the
+        // opposite parity must not replace the call at the end of our TX frame.
+        // Reconsider other stations only just before our next TX boundary.
+        if !active.contact.is_established()
+            && active.last_tx_ms.is_some()
+            && now_ms >= due - STATION_SELECTION_LEAD_MS
+        {
+            let selected = decide(None, candidates, now_ms, mine, grid, report);
+            if matches!(&selected, PolicyDecision::Start { target, .. }
+                if target != &active.contact.target)
+            {
+                return selected;
+            }
         }
         if !active.receive_ready(due) {
             return PolicyDecision::Listen(ListenReason::ReceiveIncomplete);
@@ -293,7 +335,7 @@ pub fn decide(
     }
     let boundary = (now_ms / SLOT_MS).round() * SLOT_MS;
     let due = boundary + AUDIO_OFFSET_MS;
-    if !(due - RESERVATION_LEAD_MS..=due - RESERVATION_DEADLINE_MS).contains(&now_ms) {
+    if !(due - STATION_SELECTION_LEAD_MS..=due - RESERVATION_DEADLINE_MS).contains(&now_ms) {
         return PolicyDecision::Listen(ListenReason::OutsideTransmitWindow);
     }
     for candidate in candidates {
@@ -345,6 +387,73 @@ mod tests {
     }
 
     #[test]
+    fn station_selection_waits_for_final_boundary_window_and_full_partner_turn() {
+        let mut tracker = Conversations::default();
+        hear(&mut tracker, 500.0, 13_140.0, "CQ VA3FAT FN06");
+        let candidates = [Candidate {
+            conversation: &tracker.items[0],
+            attempted_cq_ms: f64::NEG_INFINITY,
+            completed: false,
+        }];
+        assert_eq!(
+            policy(None, &candidates, 14_799.0),
+            PolicyDecision::Listen(ListenReason::OutsideTransmitWindow)
+        );
+        assert!(matches!(
+            policy(None, &candidates, 14_800.0),
+            PolicyDecision::Start { .. }
+        ));
+
+        let mut contact = crate::Contact::new("VA3FAT".into(), 500.0);
+        let active = Attempt {
+            last_tx_ms: Some(15_500.0),
+            transmissions: 1,
+            sent_step: Some(0),
+            ..attempt(&contact)
+        };
+        let mut other = Conversations::default();
+        hear(&mut other, 15_500.0, 28_140.0, "CQ K1ABC FN42");
+        let candidates = [Candidate {
+            conversation: &other.items[0],
+            attempted_cq_ms: f64::NEG_INFINITY,
+            completed: false,
+        }];
+        assert_eq!(
+            policy(Some(active), &candidates, 29_900.0),
+            PolicyDecision::Listen(ListenReason::OutsideTransmitWindow)
+        );
+        hear(&mut other, 30_500.0, 43_140.0, "CQ K1ABC FN42");
+        let candidates = [Candidate {
+            conversation: &other.items[0],
+            attempted_cq_ms: f64::NEG_INFINITY,
+            completed: false,
+        }];
+        assert!(!matches!(
+            policy(Some(active), &candidates, 44_799.0),
+            PolicyDecision::Start { .. }
+        ));
+        assert!(matches!(
+            policy(Some(active), &candidates, 44_800.0),
+            PolicyDecision::Start { .. }
+        ));
+        contact.hear(
+            "W9XYZ",
+            30_888.0,
+            "W9XYZ VA3FAT -04",
+            &format!("{}001", "0".repeat(74)),
+        );
+        let active = Attempt {
+            last_tx_ms: Some(15_500.0),
+            transmissions: 1,
+            sent_step: Some(0),
+            ..attempt(&contact)
+        };
+        assert!(
+            matches!(policy(Some(active), &candidates, 44_900.0), PolicyDecision::Transmit { message, .. } if message == "VA3FAT W9XYZ R-12")
+        );
+    }
+
+    #[test]
     fn policy_selects_priority_cq_and_respects_consumed_completed_and_own_calls() {
         let mut tracker = Conversations::default();
         for call in ["W9XYZ", "K1DONE", "K1USED", "K1NEW"] {
@@ -364,7 +473,7 @@ mod tests {
             })
             .collect();
         assert!(
-            matches!(policy(None, &candidates, 14_000.0), PolicyDecision::Start { target, .. } if target == "K1NEW")
+            matches!(policy(None, &candidates, 14_900.0), PolicyDecision::Start { target, .. } if target == "K1NEW")
         );
         assert_eq!(
             policy(None, &candidates, 30_000.0),
@@ -377,7 +486,7 @@ mod tests {
         let contact = crate::Contact::new("K1ABC".into(), 500.0);
         let active = attempt(&contact);
         assert_eq!(
-            policy(Some(active), &[], 29_000.0),
+            policy(Some(active), &[], 29_900.0),
             PolicyDecision::End(EndReason::MissedWindow)
         );
         assert_eq!(
@@ -385,7 +494,7 @@ mod tests {
             PolicyDecision::Listen(ListenReason::OutsideTransmitWindow)
         );
         assert!(
-            matches!(policy(Some(active), &[], 14_000.0), PolicyDecision::Transmit { ref message, start_ms: 15_500.0, .. } if message == "K1ABC W9XYZ EN37")
+            matches!(policy(Some(active), &[], 14_900.0), PolicyDecision::Transmit { ref message, start_ms: 15_500.0, .. } if message == "K1ABC W9XYZ EN37")
         );
         let mut waiting = Conversations::default();
         hear(&mut waiting, 500.0, 13_140.0, "CQ K1NEW FN42");
@@ -395,7 +504,7 @@ mod tests {
             attempted_cq_ms: f64::NEG_INFINITY,
         }];
         assert!(
-            matches!(policy(Some(active), &candidates, 14_000.0), PolicyDecision::Transmit { message, .. } if message.starts_with("K1ABC "))
+            matches!(policy(Some(active), &candidates, 14_900.0), PolicyDecision::Transmit { message, .. } if message.starts_with("K1ABC "))
         );
     }
 
@@ -433,7 +542,7 @@ mod tests {
                 transmissions: 2,
                 ..attempt(&contact)
             };
-            let decision = policy(Some(active), &candidates, 74_000.0);
+            let decision = policy(Some(active), &candidates, 74_900.0);
             if established {
                 assert!(
                     matches!(decision, PolicyDecision::Transmit { message, .. } if message.starts_with("KM4ESU "))
@@ -444,7 +553,7 @@ mod tests {
                 );
                 assert!(
                     !matches!(
-                        policy(Some(active), &candidates, 104_000.0),
+                        policy(Some(active), &candidates, 104_900.0),
                         PolicyDecision::Start { .. }
                     ),
                     "stale CQ must not replace an attempt"
@@ -477,7 +586,38 @@ mod tests {
             ..attempt(&contact)
         };
         assert!(
-            matches!(policy(Some(active), &[], 134_000.0), PolicyDecision::Transmit { message, .. } if message == "K1ABC W9XYZ R-12")
+            matches!(policy(Some(active), &[], 134_900.0), PolicyDecision::Transmit { message, .. } if message == "K1ABC W9XYZ R-12")
+        );
+    }
+
+    #[test]
+    fn replaced_attempt_resumption_requires_fresh_partner_evidence_and_available_turn() {
+        let mut contact = crate::Contact::new("K1ABC".into(), 500.0);
+        let payload = format!("{}001", "0".repeat(74));
+        contact.hear("W9XYZ", 60_500.0, "W9XYZ K1ABC -10", &payload);
+        let old = Attempt {
+            last_tx_ms: Some(15_500.0),
+            transmissions: 1,
+            sent_step: Some(0),
+            ..attempt(&contact)
+        };
+        assert!(old.can_resume_replaced(None, 74_900.0));
+        assert!(!old.can_resume_replaced(None, 72_000.0));
+        assert!(!old.can_resume_replaced(None, 104_900.0));
+        assert!(!old.can_resume_replaced(Some(old), 74_900.0));
+        assert!(
+            !Attempt {
+                transmissions: TOTAL_TRANSMISSION_LIMIT,
+                ..old
+            }
+            .can_resume_replaced(None, 74_900.0)
+        );
+        assert!(
+            !Attempt {
+                last_tx_ms: None,
+                ..old
+            }
+            .can_resume_replaced(None, 74_900.0)
         );
     }
 
@@ -521,7 +661,7 @@ mod tests {
             ..attempt(&contact)
         };
         assert_eq!(
-            policy(Some(active), &[], 44_000.0),
+            policy(Some(active), &[], 44_900.0),
             PolicyDecision::Listen(ListenReason::ReceiveIncomplete)
         );
         assert!(matches!(
@@ -545,13 +685,13 @@ mod tests {
             ..attempt(&contact)
         };
         assert!(matches!(
-            policy(Some(active), &[], 44_000.0),
+            policy(Some(active), &[], 44_900.0),
             PolicyDecision::Transmit { step: 2, .. }
         ));
     }
 
     #[test]
-    fn repeated_directed_stages_authorize_retries_only_in_their_receive_turn() {
+    fn established_stages_retry_on_silence_but_locator_replies_require_receive_progress() {
         fn active(contact: &crate::Contact, step: usize) -> Attempt<'_> {
             Attempt {
                 last_tx_ms: Some(45_500.0),
@@ -570,22 +710,25 @@ mod tests {
         ] {
             let mut contact = crate::Contact::new("K1ABC".into(), 500.0);
             contact.hear("W9XYZ", 30_500.0, text, &payload);
-            assert!(
-                !active(&contact, step).receive_ready(75_500.0),
+            assert_eq!(
+                active(&contact, step).receive_ready(75_500.0),
+                step >= 2,
                 "old report: {text}"
             );
             contact.hear("W9XYZ", 45_500.0, text, &payload);
-            assert!(
-                !active(&contact, step).receive_ready(75_500.0),
+            assert_eq!(
+                active(&contact, step).receive_ready(75_500.0),
+                step >= 2,
                 "wrong parity: {text}"
             );
             contact.hear("W9XYZ", 60_500.0, text, &payload);
             assert!(
-                matches!(policy(Some(active(&contact, step)), &[], 74_000.0),
+                matches!(policy(Some(active(&contact, step)), &[], 74_900.0),
                 PolicyDecision::Transmit { step: actual, .. } if actual == step)
             );
-            assert!(
-                !active(&contact, step).receive_ready(105_500.0),
+            assert_eq!(
+                active(&contact, step).receive_ready(105_500.0),
+                step >= 2,
                 "cannot reuse report: {text}"
             );
         }

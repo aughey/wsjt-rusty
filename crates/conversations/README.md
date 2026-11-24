@@ -119,7 +119,11 @@ A validated partner CQ in the current receive slot also permits an initial-call
 retry before the full slot search completes. Self echoes, unrelated callers and
 older CQs cannot authorize that retry, and renewed CQ retains the attempt budget.
 A repeated addressed partner message in the current receive slot similarly permits
-retrying the same response before the full search completes. Successful local
+retrying the same response before the full search completes.
+Once a received partner report establishes a QSO, the owed response repeats in
+each subsequent TX turn even without new partner evidence or full-search
+completion. Slot parity and all retry/attempt limits still apply. Late evidence
+can advance or cancel the executor's unstarted reservation. Successful local
 audio does not establish that the partner received it. Retain received history
 and retry budgets; the executor supplies the latest measured SNR for each report.
 `Attempt::end_reason` applies four unanswered initial calls, three transmissions
@@ -129,7 +133,20 @@ the initial-call budget. After RRR/RR73 the owed closing 73 survives partner CQ 
 traffic to another station. `after_transmission` updates successful-audio counters
 and reports completion; failed or canceled playback must never call it.
 
-The executor calls this policy near a slot boundary, reserves audio/PTT, and
+`Attempt::can_resume_replaced` checks whether a replaced attempt's validated
+partner report can reclaim an unestablished call. It requires a successful prior
+transmission, unexhausted original budgets, the immediately preceding partner
+slot, and a frame end within five seconds of the TX boundary. It never displaces
+an established QSO. The executor retains bounded replaced attempts, selects ties
+by queue priority, preserves the original record/counters, and cancels obsolete
+unstarted audio before resuming. Stale recovery evidence updates logs without
+refreshing reply eligibility.
+
+The executor calls this policy near a slot boundary and reserves audio/PTT.
+New station selection opens 200 ms before the nominal UTC boundary (700 ms before
+audio). After successful audio, replacement is considered only on our next TX
+turn, preserving the intervening partner receive slot even if an opposite-parity
+CQ is decoded first. Same-station replies may be prepared earlier. The executor
 revalidates the same message/stage/time before keying and after PTT acknowledgment.
 A changed recommendation cancels unstarted audio, releases PTT and replans. Once
 audio has started, it finishes without fabricating receive evidence. The web

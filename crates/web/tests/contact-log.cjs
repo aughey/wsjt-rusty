@@ -7,9 +7,11 @@ const vm=require('node:vm');
 const {IDBFactory, IDBObjectStore}=require('fake-indexeddb');
 const initSqlJs=require('../vendor/sql-wasm.js');
 const source=fs.readFileSync(path.join(__dirname,'../contact-log-worker.js'),'utf8');
+// Build with: node crates/web/tests/build-log-engine.cjs
+const rust=require(path.resolve(__dirname,'../../../target/log-node/wsjt_web.js'));
 function worker(indexedDB) {
     let next=0; const pending=new Map();
-    const scope={indexedDB,URL,Uint8Array,console, importScripts(){},
+    const scope={indexedDB,URL,Uint8Array,console,contactLogEngineReady:Promise.resolve(rust), importScripts(){},
         initSqlJs:()=>initSqlJs({wasmBinary:fs.readFileSync(path.join(__dirname,'../vendor/sql-wasm.wasm'))}),
         location:{href:'http://localhost/contact-log-worker.js'},
         postMessage(data){const resolve=pending.get(data.id);pending.delete(data.id);resolve(structuredClone(data));},
@@ -96,8 +98,9 @@ test('great-circle paths split across the date line with finite coordinates',()=
 
 test('completed history comes from the full durable log with the latest completion date per station',async()=>{
     const idb=new IDBFactory(),request=worker(idb),day=86400000;
-    const old={...record('old'),end_ms:record().end_ms-8*day};
-    const recent={...record('recent'),end_ms:record().end_ms-day};
+    const shifted=(id,days)=>{const r=record(id),delta=days*day;return {...r,start_ms:r.start_ms-delta,end_ms:r.end_ms-delta,evidence:r.evidence.map(e=>({...e,start_ms:e.start_ms-delta,end_ms:e.end_ms-delta}))};};
+    const old=shifted('old',8);
+    const recent=shifted('recent',1);
     const failed={...record('failed'),target:'W1FAIL',outcome:'Interrupted'};
     const many=Array.from({length:30},(_,i)=>({...record(`other-${i}`),target:`K${i}XYZ`}));
     await request({action:'save',records:[old,recent,failed,...many]});

@@ -12,6 +12,9 @@ pub mod spectrum;
 pub mod transmit;
 
 #[cfg(target_arch = "wasm32")]
+mod log_store;
+
+#[cfg(target_arch = "wasm32")]
 mod exchange_ui;
 
 #[cfg(target_arch = "wasm32")]

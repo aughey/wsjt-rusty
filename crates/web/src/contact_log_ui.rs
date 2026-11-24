@@ -1,8 +1,5 @@
 //! Tabbed, paginated local log. Database writes are acknowledged only after commit.
-use crate::{
-    contact_log::{CompletedContact, ContactRecord},
-    contact_queue::StationQueue,
-};
+use crate::{contact_log::CompletedContact, contact_queue::StationQueue};
 use leptos::prelude::*;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -24,12 +21,7 @@ extern "C" {
     fn dispose_log();
 }
 
-#[derive(Clone, Default, Deserialize)]
-struct Page {
-    records: Vec<ContactRecord>,
-    total: usize,
-    contacted: Vec<CompletedContact>,
-}
+use wsjt_log::Page;
 fn parse(value: JsValue) -> Result<Page, String> {
     serde_json::from_str(&value.as_string().unwrap_or_default()).map_err(|e| e.to_string())
 }

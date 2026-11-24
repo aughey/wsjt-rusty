@@ -69,6 +69,14 @@ Hann-windowed RustFFT of browser time-domain snapshots (about 2.69 Hz/bin at
 44.1 kHz or 2.93 Hz/bin at 48 kHz). Display bins pool peaks so narrow signals
 remain visible. The optional input waveform is under the waterfall.
 
+While attempting a contact or in an active QSO, a solid amber band marks the
+other station’s latest received 50 Hz footprint, labeled **RX**, callsign and
+audio frequency. It follows new decodes from that station and disappears when
+the attempt ends or contacting stops. The dashed cyan **TX** band shows your
+transmit frequency; labels sit on separate rows so both remain readable when
+the frequencies coincide. These markers indicate the selected exchange, not
+confirmed RF delivery.
+
 **Input peak** above the waterfall shows the maximum absolute input sample in
 each quarter-second of continuous capture, before filtering or resampling. The
 meter runs from 0 to 1; keep the peak below 1. If capture peak notifications are
@@ -535,13 +543,31 @@ joining audio across a gap or automatically rearming transmit.
 
 ### Receive readiness and final transmit authorization
 
+New-station selection opens only 200 ms before the nominal UTC transmit boundary.
+After successful audio, the current partner's entire receive turn is preserved:
+a CQ on the opposite parity cannot replace the call before its reply window.
+The final station choice uses the decodes available at that boundary. Audio still
+starts at slot +500 ms, with radio keying scheduled 500 ms before audio; received
+updates continue to revoke obsolete reservations before playback. Reply synthesis
+for the same active station may begin earlier, without committing another target.
+
+If a fresh CQ replaced an unanswered call, a subsequent addressed partner report
+can resume that earlier attempt when no established QSO owns the turn. Competing
+fresh reports follow queue priority. This preserves the original contact record,
+successful-audio counters and chosen TX tone. Replies also fill the replaced
+attempt's log when a reply cannot be scheduled. Only reports from the immediately
+preceding partner slot can resume TX; delayed recovery does not refresh them.
+Explicit Stop, removal and move to back clear resumption eligibility.
+
 The slot worker reports the last UTC receive slot whose early search completed.
 Capture progress and recovery-lane completion do not supply this authorization.
-After the initial CQ response, a retry waits for the latest partner receive slot
-search to finish. A newly validated addressed response can select a new reply
-while full-band processing continues; an owed closing 73 remains eligible.
-If slot decoding misses the scheduling deadline, wait for a later usable slot
-instead of reserving the previous message blindly. Decoder passes, candidate
+Until a partner report establishes a QSO, a retry waits for receive-slot completion
+or a new validated partner message. Once established, silence or an unfinished
+slot search repeats the owed response in our next alternating transmit slot,
+within the existing stage/attempt limits. A late decoded reply still advances or
+revokes reserved audio before it starts; partner CQ or traffic to another station
+still ends the exchange before acknowledgment. An owed closing 73 remains eligible.
+Decoder passes, candidate
 caps, full-band processing and recovery work are unchanged.
 
 Received state changes revoke obsolete reserved audio immediately through a

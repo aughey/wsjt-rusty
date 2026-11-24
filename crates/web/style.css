@@ -245,6 +245,10 @@ button.decode-box.pursued { border-width: 4px; background: color-mix(in srgb, va
 
 .tx-frequency-marker.label-right span { left: auto; right: 0; }
 
+.rx-frequency-marker { position: absolute; top: 0; bottom: 0; border-inline: 1px solid #ffce72; background: #ffce7210; pointer-events: none; z-index: 2; }
+.rx-frequency-marker span { position: absolute; top: 24px; left: 0; padding: 2px 4px; white-space: nowrap; color: #ffdf9e; background: #49351a; font-size: 11px; font-weight: 700; }
+.rx-frequency-marker.label-right span { left: auto; right: 0; }
+
 /* Full-page shell. Hidden panels must not be revived by flex/grid display rules. */
 [hidden] { display: none !important; }
 main { height: 100dvh; overflow: hidden; padding: 1rem 1.25rem; display: flex; flex-direction: column; }

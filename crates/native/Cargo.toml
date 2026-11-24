@@ -5,10 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+wsjt-log.workspace = true
+wsjt-log-sqlite.workspace = true
 eframe.workspace = true
 cpal.workspace = true
 wsjt-receiver.workspace = true
 wsjt-audio.workspace = true
+wsjt-rusty.workspace = true
+wsjt-dsp.workspace = true
+wsjt-rig-native.workspace = true
+serialport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "wsjt-native"

@@ -86,12 +86,18 @@ completion.
 
 Saved queue priorities combine **CQ first**, **strongest signal**, and **nearest
 distance** each 15-second cycle. Until a partner report is received, contact is an
-attempt: a fresh CQ selected by queue priority can replace it. Received partner
-reports establish a QSO, which stays first until it ends. Move waiting
-stations to the front or back, remove one, or **Remove all** to clear and disarm
+attempt: a fresh CQ selected by queue priority can replace it. Selection waits
+until 200 ms before our next UTC transmit boundary, preserving the partner's
+intervening receive turn. Received partner
+reports establish a QSO, which stays first until it ends.
+An addressed report from a recently replaced attempt can reclaim an unestablished
+call in its next response slot; the original log and attempt limits are retained.
+Move waiting stations to the front or back, remove one, or **Remove all** to clear and disarm
 the queue. Moving the active station to the back or removing it cancels its attempt.
 Waiting stations expire after a saved CQ timeout (180 seconds by default). Initial
-calls allow four unanswered transmissions; later stages allow three. Attempts
+calls allow four unanswered transmissions; later stages allow three. Established
+QSOs repeat the owed message in the next transmit slot if no reply is decoded,
+even while the slot worker finishes its search. Attempts
 are bounded to eight transmissions or three minutes. Unanswered initial calls move
 behind unpenalized stations for three minutes and await a fresh CQ.
 
@@ -132,17 +138,26 @@ See the [browser guide](docs/browser.md) for operating details and the
 Conversation interpretation is also available as the independent, zero-dependency
 [`ft8-conversations` crate](crates/conversations/README.md).
 
-## Native desktop receiver
+## Native desktop station
+
+[Download native applications](https://github.com/aughey/wsjt-rusty/releases/tag/native-latest)
+for Windows, Linux, macOS, and Raspberry Pi 4 (64-bit Raspberry Pi OS Bookworm+).
+Builds are unsigned; see the [native guide](docs/native.md) for dependencies and setup.
 
 An egui interface provides native audio input, spectrum/waterfall, decoded
-messages, and conversations using the same headless Rust receiver as the browser:
+messages, conversations, an IC-718 radio panel and CQ-triggered station contacting,
+using the same Rust receiver and station queue as the browser:
 
 ```sh
 cargo run -p wsjt-native --release
 ```
 
 Choose an input and click **Start listening**. Optional paced WAV playback is
-available for recorded input. This first native version is receive-only; see
+available for receive-only recorded input. Configure your callsign/grid, selected
+output and optional radio PTT, then explicitly **Start contacting** to enable
+CQ responses. **Log** stores contact attempts and evidence in local SQLite and
+exports ADIF using the same Rust formatting and storage contracts as the browser.
+Map remains browser-only. See
 [the native guide](docs/native.md) for setup, shared architecture, and limits.
 
 ## Run the browser app locally

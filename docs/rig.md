@@ -105,6 +105,19 @@ as a fallback. Manual **Receive / unkey** retains its immediate disconnect
 behavior. No radio frequency, mode or power change is made by the station queue.
 Existing FT8 microphone capture remains independent of radio serial transport.
 
+## Native desktop interface
+
+The egui app (`cargo run -p wsjt-native --release`) exposes these same commands in
+**Radio control**, including same-port or separate RTS/DTR and newer-revision CAT
+PTT. Explicit Connect reads frequency/mode/power without tuning or keying. Polls,
+operator requests and timed PTT are serialized by one native resource owner;
+errors close the session before queued reuse. **Disconnect / receive / unkey**
+disarms contacting and releases ports. Manual PTT has an independent 30-second
+watchdog. The Stations to contact executor reserves that same session for each
+frame and checks authorization before keying and again after ACK. See
+[the native guide](native.md) for configuration, output selection, startup/cancel
+behavior and tested limits. Restoration never opens ports or keys transmit.
+
 ## Native API
 
 ```rust,no_run

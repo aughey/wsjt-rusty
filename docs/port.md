@@ -27,8 +27,8 @@ Package version, Rust edition and license are inherited from `[workspace.package
 | `wsjt-rusty` | `crates/decoder` | Shared result/settings contracts, protocol adapters and bounded streaming. |
 | `wsjt-rusty-cli` | `crates/cli` | Standalone `wsjt-rusty` binary: arguments, input and text/JSONL output. |
 | `ft8-conversations` | `crates/conversations` | Standalone FT8 conversation interpretation; standard library only. |
-| `wsjt-receiver` | `crates/receiver` | Shared UI-independent receive sessions, FFT display processing and conversation presentation models. |
-| `wsjt-native` | `crates/native` | Native egui receiver and CPAL device/worker ownership; see [native guide](native.md). |
+| `wsjt-receiver` | `crates/receiver` | Shared UI-independent receive sessions, FFT display processing, conversations, station queue and attempt evidence models. |
+| `wsjt-native` | `crates/native` | Native egui station, CPAL device/output and serial worker ownership; see [native guide](native.md). |
 | `wsjt-web` | `crates/web` | Browser FT8 UI, capture, waterfall/map, contact queue, transmit audio, radio controls and local log. |
 
 The protocol crates can be used directly without the CLI or WAV loader. The

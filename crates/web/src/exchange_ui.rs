@@ -2,13 +2,7 @@
 use crate::conversations::{ExchangeSlot, SlotState};
 use leptos::prelude::*;
 
-#[derive(Clone, Default)]
-pub struct TransmitStage {
-    pub status: String,
-    pub message: String,
-    pub transmitting: bool,
-    pub sent: bool,
-}
+pub use crate::contact_queue::TransmitStage;
 
 #[component]
 pub fn ExchangeStages(

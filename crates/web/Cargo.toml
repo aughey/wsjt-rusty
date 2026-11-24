@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+wsjt-log.workspace = true
 wsjt-receiver.workspace = true
 serde.workspace = true
 wsjt-rusty.workspace = true

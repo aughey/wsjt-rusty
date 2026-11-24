@@ -1,0 +1,123 @@
+name: Build and publish native applications
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-2022
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: raspberry-pi4-aarch64
+            runner: ubuntu-24.04-arm
+          - platform: macos-aarch64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.platform }}-bookworm
+      - name: Check formatting and lint workspace
+        if: runner.os == 'Windows'
+        run: |
+          cargo fmt --all --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build and test on Windows or macOS
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p wsjt-native --release --locked
+          cargo test --workspace --release --locked
+      - name: Build and test Linux in Debian Bookworm
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Native ARM runner + baseline ARMv8 compiler target supports Pi 4.
+          # Bookworm keeps glibc at 2.36, matching 64-bit Raspberry Pi OS Bookworm.
+          mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -v "$HOME/.cargo/registry:/usr/local/cargo/registry" \
+            -v "$HOME/.cargo/git:/usr/local/cargo/git" \
+            rust:1-bookworm bash scripts/ci-native-linux.sh
+      - name: Package application
+        shell: bash
+        run: python3 scripts/package-native.py --platform '${{ matrix.platform }}' --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: target/native-dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish native downloads
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: native-dist
+      - name: Publish release assets and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native-dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" --verify-tag --title "wsjt-rusty $tag" --generate-notes
+            fi
+          else
+            tag=native-latest
+            # Move only the dedicated rolling-build tag, never a version tag.
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null || \
+              gh api --method POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+            printf 'Native build from commit %s.\n\nSee docs/native.md for platform requirements and Raspberry Pi setup. Downloads are unsigned.\n' "$GITHUB_SHA" > /tmp/native-notes.md
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release edit "$tag" --title 'Latest native development build' --notes-file /tmp/native-notes.md --prerelease
+            else
+              gh release create "$tag" --verify-tag --title 'Latest native development build' --notes-file /tmp/native-notes.md --prerelease
+            fi
+          fi
+          gh release upload "$tag" *.zip *.tar.gz SHA256SUMS --clobber

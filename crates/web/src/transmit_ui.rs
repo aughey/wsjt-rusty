@@ -651,20 +651,7 @@ pub fn StationsToContact(
                                 let transmitting = transmitting.get();
                                 let station = station.get();
                                 let contact = contact.get();
-                                std::iter::once(crate::exchange_ui::TransmitStage::default()).chain((0..5).map(|step| {
-                                    let pending = pending.as_ref().filter(|p| p.step == step);
-                                    let sent = station.sent_messages[step].as_ref();
-                                    crate::exchange_ui::TransmitStage {
-                                        status: if transmitting && pending.is_some() { "Transmitting" }
-                                            else if pending.is_some() { "Queued / finishing" }
-                                            else if sent.is_some() { "Sent audio" }
-                                            else if contact.as_ref().is_some_and(|c| c.step() == step) { "Next reply" }
-                                            else { "" }.into(),
-                                        message: pending.map(|p| p.message.clone()).or_else(|| sent.cloned()).unwrap_or_default(),
-                                        transmitting: transmitting && pending.is_some(),
-                                        sent: sent.is_some(),
-                                    }
-                                })).collect()
+                                crate::contact_queue::transmit_stages(&station, pending.as_ref(), contact.as_ref().map(|c| c.step()), transmitting)
                             }) />
                             <p class="tx-state-legend">"Pulsing amber: transmitting audio · Steady cyan: sent audio. Local playback does not confirm RF delivery."</p>
                             <details><summary>"Received conversation history"</summary><ul>{move || queue.with(|q| q.received_history(&history_call)).into_iter().map(|heard| view! { <li class="message">{heard.message}</li> }).collect_view()}</ul></details>

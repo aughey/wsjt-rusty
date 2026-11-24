@@ -1,2 +1,2 @@
-//! Browser compatibility exports; all exchange decisions live in ft8-conversations.
-pub use ft8_conversations::{Contact, QsoState};
+//! Browser compatibility exports for shared, framework-independent station logic.
+pub use wsjt_receiver::transmit::*;
