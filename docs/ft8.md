@@ -60,7 +60,8 @@ This assumes an approximately synchronized computer/radio clock for early
 results; off-clock signals still have the original 30-second recovery windows.
 No sensitivity or real-time completion guarantee is implied by the early attempt.
 The browser now includes explicit one-message FT8 audio playback; radio control
-is separate. There is no native sound-card driver or network server.
+is separate. The egui receiver now captures native sound-card input through CPAL; see
+[the native guide](native.md). There is no network server.
 
 ## Independent slot and recovery scheduling
 

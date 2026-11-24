@@ -8,10 +8,9 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rustfft.workspace = true
+wsjt-receiver.workspace = true
 serde.workspace = true
 wsjt-rusty.workspace = true
-wsjt-dsp.workspace = true
 ft8-conversations.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "wsjt-receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+rustfft.workspace = true
+wsjt-rusty.workspace = true
+wsjt-dsp.workspace = true
+ft8-conversations.workspace = true

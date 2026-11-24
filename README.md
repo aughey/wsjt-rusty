@@ -132,6 +132,19 @@ See the [browser guide](docs/browser.md) for operating details and the
 Conversation interpretation is also available as the independent, zero-dependency
 [`ft8-conversations` crate](crates/conversations/README.md).
 
+## Native desktop receiver
+
+An egui interface provides native audio input, spectrum/waterfall, decoded
+messages, and conversations using the same headless Rust receiver as the browser:
+
+```sh
+cargo run -p wsjt-native --release
+```
+
+Choose an input and click **Start listening**. Optional paced WAV playback is
+available for recorded input. This first native version is receive-only; see
+[the native guide](docs/native.md) for setup, shared architecture, and limits.
+
 ## Run the browser app locally
 
 ```sh
@@ -154,7 +167,7 @@ and browser validation details.
 ## Command line
 
 ```sh
-# FT8 remains the default; the workspace has one binary, so this still works.
+# FT8 remains the default; the workspace defaults to the CLI package.
 cargo run --release -- digirig-2026-11-21-2min.wav
 
 # WSPR, using the public WSJT-X sample included as a test fixture.

@@ -82,11 +82,17 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
   `wsjt-rusty`. Depends on the framework and audio crates. `serde_json` belongs
   in presentation/transport crates (CLI and web); decoder libraries do not
   depend on command-line or browser presentation.
+- `wsjt-receiver` (`crates/receiver`): shared framework-independent receive-session
+  scheduling/UTC mapping, spectrum/level/color processing, annotation geometry,
+  geographic/category helpers, conversation adapter and bounded native history.
+  Browser modules re-export these implementations; keep devices and UI frameworks out.
+- `wsjt-native` (`crates/native`): egui receive-only desktop UI and CPAL input,
+  with independent native slot/recovery threads and aggregate 60-second PCM credit.
+  Spectrum, decoded messages and conversations reuse `wsjt-receiver`; see `docs/native.md`.
 - `wsjt-web` (`crates/web`): browser-only Leptos CSR shell, built with Trunk.
   Owns continuous AudioWorklet microphone capture, waveform/FFT waterfall, UTC
   session timing and separate slot/recovery WASM workers using `Ft8Decoder`/`AudioStream`.
-  Its library target is a WASM entry point, preserving the CLI as the only
-  native binary.
+  Its library target is a WASM entry point; the egui app is a separate native binary.
   Resample continuous PCM with `wsjt-dsp::StreamingDownsampler`; analyser snapshots
   are visualization-only. Bound transport to 60 seconds; fail explicitly on
   overrun/discontinuity. Stop releases input and flushes the decoder.
@@ -108,7 +114,7 @@ protocol algorithms in their protocol crates. Integration regressions belong
 in `crates/decoder/tests`, with original fixtures retained at `tests/fixtures`.
 Algorithm-local unit tests and audio input regressions remain in their owning
 crates. `cargo run --release -- ...` works at the root because the workspace has
-one binary; explicit CLI selection is `cargo run -p wsjt-rusty-cli --release -- ...`.
+the CLI as its default member; explicit CLI selection is `cargo run -p wsjt-rusty-cli --release -- ...`.
 
 ## Architecture and code map
 
@@ -439,8 +445,8 @@ zero-tail and message-plausibility checks. FT8 does validate its augmented CRC.
 Known limits remain documented in the mode notes. FT8 lacks some specialized
 assisted paths and full sensitivity parity; WSPR lacks WSPR-15, Jelinek/optional
 OSD alternatives and `.c2` input. The browser shell provides microphone waveform
-visualization and live FT8 decoding; browser WSPR decoding, native sound-card
-capture, networking and spot upload have not been implemented. These are future
+visualization and live FT8 decoding; the egui interface adds native sound-card
+capture. Browser WSPR decoding, networking and spot upload have not been implemented. These are future
 scope, not existing shared services.
 
 Queued station cards share `exchange_ui.rs` with conversations for the six received

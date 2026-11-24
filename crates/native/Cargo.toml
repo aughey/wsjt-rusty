@@ -1,0 +1,15 @@
+[package]
+name = "wsjt-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe.workspace = true
+cpal.workspace = true
+wsjt-receiver.workspace = true
+wsjt-audio.workspace = true
+
+[[bin]]
+name = "wsjt-native"
+path = "src/main.rs"
