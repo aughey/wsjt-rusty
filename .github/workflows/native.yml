@@ -65,6 +65,8 @@ jobs:
           # Native ARM runner + baseline ARMv8 compiler target supports Pi 4.
           # Bookworm keeps glibc at 2.36, matching 64-bit Raspberry Pi OS Bookworm.
           mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          # Container builds run as root; restore ownership for artifact/cache cleanup.
+          trap 'sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/target" "$HOME/.cargo/registry" "$HOME/.cargo/git"' EXIT
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
             -v "$HOME/.cargo/registry:/usr/local/cargo/registry" \
