@@ -492,23 +492,44 @@ occupancy; received history remains visible and continues aging against audio ti
 
 ### Contact state and reply scheduling
 
+After output preparation, the Leptos shell runs
+`state_logic::contact_stations` in one cancelable local task. The selected
+conversation and suspended attempts live on that future's stack. The procedure
+notifies its adapter through `set_current_conversation`; there is no getter.
+Its exchange loop reads the latest validated partner reply (including CQ), sends
+the corresponding response, waits through receive, and reads again. A newer
+locator or CQ can rewind the owed response; total/initial/stage budgets still
+bound the attempt. Successful closing-73 audio completes the exchange.
+
+The browser queue is a passive station list/display projection. Its legacy
+planner, clock transitions, completion policy and transmit authorization are
+inert in this mode. The adapter executes only actions for the supplied shared
+conversation handle, checks current received evidence before key/audio, and
+publishes status/PCM completion/log updates. Shared received contexts and stable
+log IDs remain available for late RX updates without designating a current QSO.
+Stop/input interruption/unmount abort the task; dropping a transmit future
+arranges release through the JS/PTT owner even with a key acknowledgment pending.
+The interval handles display, list sorting/expiry and frequency readbacks.
+Pending log revisions survive cancellation until durable commit is acknowledged.
+
 The queue displays whether contacting is paused, waiting for a fresh CQ, or in
 an active QSO, including the required outgoing action and audio reservation.
-Only one station owns the active exchange. Sorting and new CQs from other
-stations cannot replace it; completion, cancellation, another partner, a renewed
-CQ after progress, or an attempt limit releases it. A new attempt requires a
+Only one station owns the active exchange. Once partner report evidence
+establishes a QSO, sorting and new CQs cannot replace it; completion, cancellation,
+another partner, or an attempt limit releases it. A newer CQ from the partner
+requests another locator response within the existing budget. A new attempt requires a
 fresh, unused CQ in its immediately following response window.
 
-`crates/conversations/src/session.rs` defines the headless `QsoState` progression: Calling, SendingReport,
-SendingRogerReport, SendingAcknowledgment, SendingFarewell and Closed. Validated
-ordinary messages from the selected partner addressed to our callsign advance
-it: locator selects report, report selects R-report, R-report selects RR73,
-RRR/RR73 selects 73, and received 73 closes the exchange. Missing intermediate
-RX stages are allowed; repeated or older-stage messages never regress state.
+The headless receive models retain furthest-heard evidence for cards and context.
+The procedure's next send comes from the latest validated partner frame instead:
+CQ selects locator, locator selects report, report selects R-report, R-report
+selects RR73, RRR/RR73 selects 73, and received 73 closes the exchange. Newer
+locators or reports can rewind the response without erasing received stages.
+Missing intermediate frames require no invented evidence. Frame-time ordering
+keeps a delayed older recovery decode from rewinding a newer received frame.
 Messages must belong to the partner's alternating UTC slots after the opening
 CQ; wrong recipients, other senders, invalid payload types and nonfinite times
-cannot advance it. Delayed recovery evidence is processed independently of the
-latest text on the station card.
+cannot control the exchange. Local playback never becomes a received reply.
 
 Playback completion updates sent history and retry counts, never RX progress.
 Before audio starts, the scheduler revokes a reserved waveform if new evidence
@@ -521,7 +542,7 @@ they are not a claim of formally verified software or physical radio delivery.
 
 The fourth unanswered initial call is followed by its final receive window,
 shown as “waiting for final reply (4/4 calls)”. When that window closes, the
-regular clock tick ends the attempt, moves the station to the back, and applies
+procedure ends the attempt, moves the station to the back, and applies
 the three-minute sorting penalty even while radio readiness or a frequency
 query blocks new transmissions. Repeated CQs do not reset the attempt's call
 budget. Cards show initial calls this attempt out of four separately from total initial
@@ -529,10 +550,12 @@ calls while queued, which accumulate across attempts until capture restarts.
 The penalty changes sorting priority; a penalized station can still be selected
 on a new CQ if no unpenalized caller is eligible.
 
-An accepted RRR/RR73 commits the outgoing closing 73. Subsequent CQ or
-third-party exchanges cannot revoke that farewell, including while its audio
-is reserved. Explicit Stop, capture/output/radio failures and attempt limits
-still cancel it. Before acknowledgment, abandoning an exchange requires a newer
+RRR/RR73 requests closing 73. Successful closing audio completes the exchange;
+no response is needed to a received 73. Pending audio is revalidated against the
+latest reply, including when a closing response was superseded before it started.
+The loop then recomputes the response without remembering a closing flag.
+Explicit Stop, capture/output/radio failures and attempt limits still cancel it.
+Before acknowledgment, abandoning an exchange requires a newer
 partner receive slot; another decode's fine timing within the same slot cannot
 cancel the accepted response. Queued cards prefer our station/partner pair's
 received stage evidence over the partner's other conversations. Ended attempts

@@ -1,30 +1,42 @@
 # Async QSO logic
 
-The control flow follows the exchange directly:
+The procedure selects a conversation, notifies the adapter, and loops:
+read `last_reply`, choose its response, send, wait for receive, then read again.
+`Reply` includes CQ, locator, report, roger-report, acknowledgment and farewell.
+A newer earlier-stage reply can rewind the response; missing intermediate messages
+need no invented stages. Completed audio stays separate from received evidence.
 
-1. Wait for a station sending CQ.
-2. Call with our locator and wait for its reply.
-3. Exchange reports and acknowledgments, skipping stages already received.
-4. Send closing 73 and record the outcome.
-5. Return to looking for a station.
+`contact_stations(&mut control)` keeps the selected handle and suspended attempts
+on its async stack. `set_current_conversation(Some(handle))` and `None` are
+notifications for display/logging. There is no current-conversation getter.
+`exchange(control, station)` creates its own accounting-only budget from elapsed
+time and completed audio receipts. It has no closing/established flags and takes
+no budget argument. Replacement returns `Replaced`; the outer loop selects again.
+Resumed handles supply their prior completed receipts so limits are not reset.
+Selection, replacement/resumption and limits remain in the state logic. Initial calls allow
+four transmissions, other stages three, with eight total and 180 seconds. Even
+the final allowed send gets a receive turn. Received 73 needs no response;
+successful closing-73 audio also completes the exchange. Completion is a property
+of that response, not remembered closing state. Superseded audio rereads the latest
+reply without spending a try.
 
-`contact_stations(&mut control)` runs this loop. `finish_qso` holds one exchange's
-retry counts and elapsed-time budget on the async stack. Initial calls allow
-four transmissions, later stages three, with an overall eight-transmission /
-180-second limit. The last allowed transmission still gets its reply window.
+`Conversation` supplies a live shared handle to received facts. `Control` supplies
+a priority-ordered list, time waits, action execution and notifications. Transmit
+and receive waits receive the remaining time budget from the procedure; they
+must return when it expires. False from `transmit` means no completed audio, so
+the loop rereads the reply without spending a try.
 
-`Conversation` is a live handle to validated, monotonically advancing partner
-replies. `Control` supplies the priority-ordered candidates, clock, slot/reply
-waits, transmit operation and durable outcome recording. Keep payload validation,
-queue replacement/resumption, radio resources and database ownership in those
-adapters. No concrete FT8 types or async runtime are required here. Browser and
-native integration remains separate.
+The Leptos adapter is `crates/web/src/transmit_ui/control.rs`. Shared `Rc` handles
+carry received observations and stable log IDs. The browser queue is a passive
+list/display projection: waits never call its planner or obtain a selected target
+from it. `BrowserConversations` retains received/log data across Stop for late
+updates; it has no selected-conversation property. Native callers retain their
+legacy executor until migrated separately. `web-time::Instant` supplies the same
+clock API on native and WASM.
 
-Dropping the operation cancels its current await. A transmit future must own a
-reservation guard that cancels output and arranges unkeying on drop, even with a
-pending key acknowledgment. Log writes must also be cancel safe and acknowledge
-only durable commits. These are adapter responsibilities; the procedure spawns
-no tasks and needs no asynchronous cleanup after an await.
+Dropping the current transmit future revokes pending audio and arranges unkeying,
+even with a pending key acknowledgment. The log service keeps pending revisions
+until a durable commit; canceling the procedure never acknowledges a write.
 
-Run `cargo test -p state-logic --release` for exchange, retry and cancellation
-regressions.
+Run `cargo test -p state-logic --release` for exchange, rewind, selection, retry
+and cancellation regressions.

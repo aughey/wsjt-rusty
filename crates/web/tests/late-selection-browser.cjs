@@ -240,10 +240,39 @@ const { chromium } = require("playwright"),
     await row.getByRole('button',{name:/View.*events/}).click();
     await page.locator('#log-evidence tbody tr').filter({hasText:'TX audio'}).filter({hasText:'VA3FAT N9IOX R-15'}).waitFor();
     assert.doesNotMatch(await page.locator('#log-evidence').innerText(),/Attempt replaced/);
+    // A newer locator after a report rewinds the owed response. The queue's
+    // furthest-heard display stage must not choose what the procedure sends.
+    await select("Stations to contact");
+    await hear(5520500,"CQ K1ABC FN42",-10);
+    await tick(5534900);
+    await page.waitForFunction(()=>outputs.length===4);
+    await tick(5535600); await tick(5548400);
+    await hear(5550500,"N9IOX K1ABC -04",-10);
+    await tick(5564900);
+    await page.waitForFunction(()=>outputs.length===5);
+    assert.match(await page.locator('.contact-policy-decision').innerText(),/K1ABC N9IOX R-10/);
+    await tick(5565600); await tick(5578400);
+    await hear(5580500,"N9IOX K1ABC FN42",-10);
+    await tick(5594900);
+    await page.waitForFunction(()=>outputs.length===6);
+    assert.match(await page.locator('.contact-policy-decision').innerText(),/K1ABC N9IOX -10/);
+    await tick(5595600); await tick(5608400);
+    await hear(5610500,"N9IOX K1ABC -06",-10);
+    await tick(5624900);
+    await page.waitForFunction(()=>outputs.length===7);
+    assert.match(await page.locator('.contact-policy-decision').innerText(),/K1ABC N9IOX R-10/);
+    await tick(5625600); await tick(5638400);
+    await hear(5640500,"N9IOX K1ABC RR73",-10);
+    await tick(5654900);
+    await page.waitForFunction(()=>outputs.length===8);
+    await tick(5655600); await tick(5668400);
+    await select("Log");
+    await page.getByRole('tab',{name:'Contacts',exact:true}).click();
+    await page.locator('#log-contacts tbody tr').filter({hasText:'K1ABC'}).filter({hasText:'Completed'}).waitFor();
     await page.getByRole('button',{name:'Stop',exact:true}).click();
     await page.getByRole('status').filter({hasText:'Final FT8 decode complete'}).waitFor({timeout:60000});
     assert.deepEqual(errors,[]);
-    console.log('PASS: final-boundary station selection preserves VA3FAT receive turn and accepts the late report ahead of a competing CQ');
+    console.log('PASS: final-boundary selection preserves the receive turn; newer locator rewinds the response and the exchange completes');
   } finally {
     await browser.close();
   }

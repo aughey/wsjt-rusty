@@ -1339,6 +1339,8 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
 dependencies = [
+ "futures-channel",
+ "futures-core",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -3416,6 +3418,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "state-logic"
 version = "0.1.0"
+dependencies = [
+ "web-time",
+]
 
 [[package]]
 name = "static_assertions"
@@ -4545,12 +4550,14 @@ name = "wsjt-web"
 version = "0.1.0"
 dependencies = [
  "ft8-conversations",
+ "futures-util",
  "gloo-render",
  "gloo-timers",
  "js-sys",
  "leptos",
  "serde",
  "serde_json",
+ "state-logic",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

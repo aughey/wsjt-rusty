@@ -13,6 +13,8 @@ const MAX_STATIONS: usize = 100;
 #[derive(Clone, Debug)]
 pub struct Station {
     pub call: String,
+    /// List incarnation/cancel token, independent of QSO selection.
+    pub generation: u64,
     pub received: Vec<Evidence>,
     pub location: Option<(f64, Location)>,
     pub latest_ms: f64,
@@ -30,7 +32,7 @@ pub struct Station {
     pub sent_messages: [Option<String>; 5],
     /// Successfully completed initial-call audio while this station is queued.
     pub contact_tries: usize,
-    attempted_cq_ms: f64,
+    pub attempted_cq_ms: f64,
     pub sort_penalty_until_ms: f64,
 }
 impl Station {
@@ -130,6 +132,15 @@ pub enum ContactingState {
 }
 #[derive(Clone, Debug, Default)]
 pub struct StationQueue {
+    /// Browser mode: active/pending are display projections only. Native callers
+    /// retain their legacy executor until migrated separately.
+    pub passive: bool,
+    /// Presentation supplied by the async procedure/its action adapter.
+    pub procedure_status: Option<String>,
+    /// Bounded decoded input for passive conversation handles and receive display.
+    pub recent_received: Vec<Evidence>,
+    pub observation_revision: u64,
+    next_station_generation: u64,
     pub items: Vec<Station>,
     pub enabled: bool,
     /// CQ state, strongest signal, then nearest distance; unchecked keys are skipped.
@@ -243,6 +254,12 @@ impl StationQueue {
         if !self.enabled {
             return "Policy paused · Start contacting to enable decisions".into();
         }
+        if self.passive {
+            return self
+                .procedure_status
+                .clone()
+                .unwrap_or_else(|| "Listening · waiting for a fresh CQ".into());
+        }
         match &self.policy {
             Some(PolicyDecision::Listen(reason)) => reason.label().into(),
             Some(PolicyDecision::Start { target, .. }) => {
@@ -255,6 +272,9 @@ impl StationQueue {
     }
     /// Authorization is checked again by the transport at the key/audio boundary.
     pub fn can_transmit(&self, id: u64) -> bool {
+        if self.passive {
+            return false;
+        }
         let Some(p) = self.pending.as_ref().filter(|p| p.id == id) else {
             return false;
         };
@@ -505,6 +525,15 @@ impl StationQueue {
         if !received_ms.is_finite() || received_ms <= 0.0 {
             return;
         }
+        for event in &mut self.recent_received {
+            if event.message == text
+                && (event.start_ms - start_ms).abs() < 350.0
+                && event.received_at_ms.is_none()
+            {
+                event.received_at_ms = Some(received_ms);
+                self.observation_revision += 1;
+            }
+        }
         for s in &mut self.items {
             for event in &mut s.received {
                 if event.message == text
@@ -541,7 +570,9 @@ impl StationQueue {
         if self.contains(&call) || self.items.len() >= MAX_STATIONS {
             return;
         }
+        self.next_station_generation += 1;
         self.items.push(Station {
+            generation: self.next_station_generation,
             call,
             received: Vec::new(),
             location: None,
@@ -711,6 +742,47 @@ impl StationQueue {
     pub fn cancel_active(&mut self) {
         self.end_active("Interrupted");
     }
+    /// Live/archived received progress for a stable attempt handle. Reconstruct
+    /// archived progress only from original RX payloads, never from sent audio.
+    pub fn contact_for_attempt(&self, id: &str) -> Option<Contact> {
+        if let Some(a) = self.active.as_ref().filter(|a| a.record.id == id) {
+            return Some(a.contact.clone());
+        }
+        if let Some(a) = self.replaced_attempts.iter().find(|a| a.record.id == id) {
+            return Some(a.contact.clone());
+        }
+        let record = self.recent_logs.iter().find(|r| r.id == id)?;
+        let mut contact = Contact::new(record.target.clone(), record.start_ms);
+        for e in &record.evidence {
+            if e.direction == "RX"
+                && let Some(payload) = &e.payload
+            {
+                contact.hear(&record.station_call, e.start_ms, &e.message, payload);
+            }
+        }
+        Some(contact)
+    }
+
+    /// End only the attempt the async caller still owns. An obsolete completion
+    /// must not overwrite an archived attempt or a newer target's log.
+    pub fn finish_attempt(&mut self, id: &str, reason: EndReason, now_ms: f64) {
+        let Some(a) = self.active.as_ref().filter(|a| a.record.id == id) else {
+            return;
+        };
+        let target = a.contact.target.clone();
+        if let Some(station) = self.items.iter_mut().find(|s| s.call == target) {
+            station.attempted_cq_ms = station.latest_ms;
+            if reason == EndReason::Unanswered {
+                station.sort_penalty_until_ms = now_ms + manager::UNANSWERED_PENALTY_MS;
+            }
+        }
+        self.end_active(reason.label());
+        if reason == EndReason::Completed {
+            self.remove(&target);
+        } else {
+            self.to_back(&target);
+        }
+    }
     pub fn clear(&mut self) {
         self.stop();
         self.items.clear();
@@ -771,6 +843,10 @@ impl StationQueue {
         self.replaced_attempts.clear();
     }
     pub fn to_back(&mut self, call: &str) {
+        self.next_station_generation += 1;
+        if let Some(s) = self.items.iter_mut().find(|s| s.call == call) {
+            s.generation = self.next_station_generation;
+        }
         self.replaced_attempts.retain(|a| a.contact.target != call);
         if self
             .active
@@ -808,10 +884,14 @@ impl StationQueue {
     pub fn reset_observations(&mut self) {
         self.stop();
         self.observations = Conversations::default();
+        self.recent_received.clear();
+        self.observation_revision += 1;
         self.recent_logs.clear();
         self.last_sort_slot = None;
         self.completed_receive_slot = None;
         for s in &mut self.items {
+            self.next_station_generation += 1;
+            s.generation = self.next_station_generation;
             s.latest_ms = f64::NEG_INFINITY;
             s.location = None;
             s.kind = MessageKind::Other;
@@ -827,7 +907,99 @@ impl StationQueue {
             s.sort_penalty_until_ms = f64::NEG_INFINITY;
         }
     }
+    /// Receive observations only; the browser's procedure owns the exchange.
+    /// Temporarily detach display projections so legacy QSO execution is inert.
     pub fn hear(
+        &mut self,
+        mine: &str,
+        start_ms: f64,
+        text: &str,
+        payload: &str,
+        snr_db: f32,
+        frequency_hz: f32,
+    ) {
+        if !self.passive {
+            return self.hear_inner(mine, start_ms, text, payload, snr_db, frequency_hz);
+        }
+        if start_ms.is_finite()
+            && classify(text, payload) != MessageKind::Other
+            && !self.recent_received.iter().any(|e| {
+                e.message == text
+                    && (e.start_ms - start_ms).abs() < 350.0
+                    && (e.frequency_hz - frequency_hz).abs() < 4.0
+            })
+        {
+            self.recent_received.push(Evidence {
+                start_ms,
+                end_ms: start_ms + 12_640.0,
+                direction: "RX".into(),
+                message: text.into(),
+                payload: Some(payload.into()),
+                snr_db: Some(snr_db),
+                frequency_hz,
+                received_at_ms: None,
+            });
+            if self.recent_received.len() > 500 {
+                self.recent_received.remove(0);
+            }
+            self.observation_revision += 1;
+        }
+        let active = self.active.take();
+        let archived = std::mem::take(&mut self.recent_logs);
+        let replaced = std::mem::take(&mut self.replaced_attempts);
+        self.hear_inner(mine, start_ms, text, payload, snr_db, frequency_hz);
+        self.active = active;
+        self.recent_logs = archived;
+        self.replaced_attempts = replaced;
+    }
+
+    pub fn completed_receive_slot(&self) -> Option<i64> {
+        self.completed_receive_slot
+    }
+
+    pub fn cq_is_calling(&self, call: &str, boundary_ms: f64) -> bool {
+        self.observations
+            .items
+            .iter()
+            .filter(|c| c.caller == call || c.partner.as_deref() == Some(call))
+            .max_by(|a, b| a.last_ms.total_cmp(&b.last_ms))
+            .is_some_and(|c| {
+                ft8_conversations::select_active_conversation(std::slice::from_ref(c), boundary_ms)
+                    .is_some()
+            })
+    }
+
+    pub fn attempt_record(&self, id: &str) -> Option<&ContactRecord> {
+        self.active
+            .iter()
+            .map(|a| &a.record)
+            .chain(self.recent_logs.iter())
+            .chain(self.log_pending.values())
+            .filter(|r| r.id == id)
+            .max_by_key(|r| r.revision)
+    }
+
+    /// Accept an owned display/log projection; never select or advance a QSO.
+    pub fn publish_attempt(&mut self, exchange: &Exchange) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.record.id == exchange.record.id)
+        {
+            self.active = Some(exchange.clone());
+        }
+        if exchange.record.outcome != "In progress" {
+            self.recent_logs.retain(|r| r.id != exchange.record.id);
+            self.recent_logs.push(exchange.record.clone());
+            if self.recent_logs.len() > 200 {
+                self.recent_logs.remove(0);
+            }
+        }
+        self.log_pending
+            .insert(exchange.record.id.clone(), exchange.record.clone());
+    }
+
+    fn hear_inner(
         &mut self,
         mine: &str,
         start_ms: f64,
@@ -1017,6 +1189,9 @@ impl StationQueue {
     /// Process clock-driven terminal transitions even when radio/output readiness
     /// prevents planning another frame. A reserved/playing frame owns its tail.
     pub fn advance_time(&mut self, now_ms: f64) {
+        if self.passive {
+            return;
+        }
         if !self.enabled || self.pending.is_some() || !now_ms.is_finite() {
             return;
         }
@@ -1052,6 +1227,9 @@ impl StationQueue {
     }
     /// Called near the response boundary; never roll a stale CQ into a later period.
     pub fn plan(&mut self, now_ms: f64, mine: &str, grid: &str) -> Option<Plan> {
+        if self.passive {
+            return None;
+        }
         self.advance_time(now_ms);
         if !self.enabled || self.pending.is_some() || !now_ms.is_finite() {
             return None;
@@ -1177,6 +1355,9 @@ impl StationQueue {
     /// audio starts. The UI cancels the transport and waits for release before replanning.
     /// After audio starts, finish that frame and use new state next time.
     pub fn refresh_pending(&mut self, now_ms: f64) {
+        if self.passive {
+            return;
+        }
         if let Some(p) = &self.pending
             && now_ms.is_finite()
             && now_ms < p.start_ms
@@ -1192,6 +1373,9 @@ impl StationQueue {
         }
     }
     pub fn complete(&mut self, id: u64, success: bool) {
+        if self.passive {
+            return;
+        }
         let Some(p) = self.pending.as_ref().filter(|p| p.id == id).cloned() else {
             return;
         };
@@ -2586,6 +2770,74 @@ mod tests {
         q.add("N0XYZ".into());
         q.enabled = true;
         q
+    }
+    #[test]
+    fn passive_queue_observes_received_frames_without_executing_a_qso() {
+        let mut q = queue();
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        let initial = q.plan(14_900.0, "W9XYZ", "EN37").unwrap();
+        q.complete(initial.id, true);
+        q.passive = true;
+        hear(&mut q, 30_500.0, "W9XYZ K1ABC -09");
+        q.record_arrival(30_500.0, "W9XYZ K1ABC -09", 43_900.0);
+        assert_eq!(
+            q.active.as_ref().unwrap().contact.state(),
+            QsoState::Calling,
+            "the queue must not advance the projected conversation"
+        );
+        assert_eq!(
+            q.recent_received.last().unwrap().received_at_ms,
+            Some(43_900.0)
+        );
+        assert!(q.plan(44_900.0, "W9XYZ", "EN37").is_none());
+        assert!(!q.can_transmit(initial.id));
+        q.advance_time(900_000.0);
+        assert!(
+            q.active.is_some(),
+            "only the procedure can finish its projection"
+        );
+    }
+    #[test]
+    fn async_handles_keep_received_progress_and_cannot_finish_a_newer_target() {
+        let mut q = queue();
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        let first = q.plan(14_900.0, "W9XYZ", "EN37").unwrap();
+        let id = q.active.as_ref().unwrap().record.id.clone();
+        q.complete(first.id, true);
+        assert_eq!(
+            q.contact_for_attempt(&id).unwrap().state(),
+            QsoState::Calling,
+            "sent audio is not a received reply"
+        );
+        hear(&mut q, 30_500.0, "W9XYZ K1ABC -09");
+        q.cancel_active();
+        assert_eq!(
+            q.contact_for_attempt(&id).unwrap().state(),
+            QsoState::SendingRogerReport
+        );
+        hear(&mut q, 60_500.0, "CQ N0XYZ EM00");
+        let next = q.plan(74_900.0, "W9XYZ", "EN37").unwrap();
+        q.finish_attempt(&id, EndReason::Completed, 74_950.0);
+        assert_eq!(q.pending.as_ref().unwrap().id, next.id);
+        assert_eq!(q.active.as_ref().unwrap().contact.target, "N0XYZ");
+        assert!(q.contact_for_attempt("unknown").is_none());
+    }
+
+    #[test]
+    fn archived_local_73_does_not_become_received_closing_evidence() {
+        let mut q = queue();
+        hear(&mut q, 500.0, "CQ K1ABC FN42");
+        let first = q.plan(14_900.0, "W9XYZ", "EN37").unwrap();
+        let id = q.active.as_ref().unwrap().record.id.clone();
+        q.complete(first.id, true);
+        hear(&mut q, 30_500.0, "W9XYZ K1ABC RR73");
+        let closing = q.plan(44_900.0, "W9XYZ", "EN37").unwrap();
+        q.complete(closing.id, true);
+        assert!(q.active.is_none());
+        assert_eq!(
+            q.contact_for_attempt(&id).unwrap().state(),
+            QsoState::SendingFarewell
+        );
     }
     fn exhausted_report_attempt() -> StationQueue {
         let mut q = queue();

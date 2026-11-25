@@ -24,6 +24,9 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
+state-logic = { path = "crates/state-logic" }
+web-time = "1.1"
+futures-util = "0.3"
 wsjt-log = { path = "crates/log" }
 wsjt-log-sqlite = { path = "crates/log-sqlite" }
 time = { version = "0.3", default-features = false, features = ["std"] }
@@ -38,7 +41,7 @@ wsjt-rig = { path = "crates/rig" }
 wsjt-rig-native = { package = "wsjt-rig", path = "crates/rig", features = ["native"] }
 leptos = { version = "0.8", features = ["csr"] }
 gloo-render = "0.3"
-gloo-timers = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

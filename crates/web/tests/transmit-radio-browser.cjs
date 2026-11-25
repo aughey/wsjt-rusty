@@ -15,7 +15,7 @@ const path = require('node:path');
       };
       const OriginalWorker = Worker;
       window.priorityRequests = [];
-      window.Worker = class extends OriginalWorker { constructor(...args) { super(...args); window.testWorker = this; } postMessage(data,...rest) { if(data.kind==='priorities') priorityRequests.push(data.frequencies); return super.postMessage(data,...rest); } };
+      window.Worker = class extends OriginalWorker { constructor(...args) { super(...args);  } postMessage(data,...rest) { if(data.role==='slot') window.testWorker=this; if(data.kind==='priorities') priorityRequests.push(data.frequencies); return super.postMessage(data,...rest); } };
       const now = Date.now.bind(Date); window.offset = 0; Date.now = () => now() + offset;
       window.setUtc = utc => { offset = utc - now(); };
       const enumerate = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
@@ -76,7 +76,10 @@ const path = require('node:path');
               input.enqueue(new Uint8Array(response.slice(3)));
             } });
           },
-          async setSignals(signals) { rig.signals.push(signals); },
+          async setSignals(signals) {
+            rig.signals.push(signals);
+            if (signals.requestToSend && rig.holdKey) await new Promise(resolve => { window.releaseKeyAck = resolve; });
+          },
           async close() { rig.closes++; this.readable = null; this.writable = null; },
         };
         return port;
@@ -85,12 +88,15 @@ const path = require('node:path');
     });
     const url = process.argv[2] || 'http://127.0.0.1:8083';
     await page.goto(url);
+    const select = name => page.getByRole('tab', { name, exact: true }).click();
+    await select('Radio control');
     const radio = page.getByRole('region', { name: 'IC-718 radio control' });
     await radio.getByLabel('PTT method').selectOption('cat-rts');
     await radio.getByRole('button', { name: 'Connect radio', exact: true }).click();
     await radio.getByText('IC-718 connected; polling every 2 seconds', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Start listening', exact: true }).click();
     await page.getByRole('status').filter({ hasText: 'Listening for FT8' }).waitFor({ timeout: 35000 });
+    await select('Conversations');
     await page.locator('.conversation').first().waitFor({ timeout: 60000 });
     async function send(start, messages, incremental = false) {
       await page.evaluate(({start,messages,incremental}) => {
@@ -108,14 +114,18 @@ const path = require('node:path');
     await send(epoch-30000+500, ['K2XYZ K1ABC -10', 'K3XYZ N0XYZ -10']);
     await page.locator('.conversation').filter({hasText:'K1ABC ↔ K2XYZ'}).click();
     await page.locator('.conversation').filter({hasText:'N0XYZ ↔ K3XYZ'}).click();
+    await select('Stations to contact');
     const panel = page.getByRole('region', {name:'Stations to contact', exact:true});
     await panel.locator('[data-station="K1ABC"]').getByRole('button', {name:'Move to back',exact:true}).click();
-    await panel.getByLabel('My callsign', {exact:true}).fill('W9XYZ');
-    await panel.getByLabel('My grid', {exact:true}).fill('EN37');
-    await panel.getByLabel('Transmit audio output', {exact:true}).selectOption('radio-card');
-    await panel.getByLabel('TX audio attenuation', {exact:true}).fill('12');
+    await select('Contact configuration');
+    await page.getByLabel('My callsign', {exact:true}).fill('W9XYZ');
+    await page.getByLabel('My grid', {exact:true}).fill('EN37');
+    await page.getByLabel('Transmit audio output', {exact:true}).selectOption('radio-card');
+    await page.getByLabel('find an open frequency', {exact:true}).uncheck();
+    await select('Stations to contact');
+    await panel.getByLabel('TX level', {exact:true}).fill('12');
     await panel.getByRole('button', {name:'Start contacting',exact:true}).click();
-    await panel.getByText('CQ watch enabled', {exact:true}).waitFor();
+    await panel.getByRole('status').filter({hasText:'Waiting for available CQ station'}).waitFor();
     assert.equal(await page.evaluate(() => resumeCount >= 2), true, 'output resumes after sink suspension');
     await page.waitForTimeout(500);
     assert.deepEqual(await page.evaluate(() => played), []);
@@ -125,7 +135,11 @@ const path = require('node:path');
     await panel.locator('[data-station="N0XYZ"].active').waitFor();
     assert.deepEqual(await page.evaluate(() => priorityRequests.at(-1)), [1200]);
     assert.match(await panel.locator('[data-station="N0XYZ"] .station-cq').innerText(), /Last CQ: (just now|.* ago)/);
-    assert.match(await panel.locator('[data-station="N0XYZ"] .station-cq-delay').innerText(), /before reply deadline/);
+    const decodeDelay = await panel.locator('[data-station="N0XYZ"] .station-cq-delay').innerText();
+    assert.match(decodeDelay, /Decoded [0-9.]+ s after CQ ended/);
+    assert.doesNotMatch(decodeDelay, /deadline missed/);
+    assert.ok(Math.abs(await page.evaluate(() => played[0].utc) - (epoch + 15500)) < 100,
+      'fresh CQ audio starts in the immediately following UTC slot');
     assert.equal(await page.evaluate(() => played[0].keyed), true);
     assert.equal(await page.evaluate(() => played[0].length), 151680);
     assert.ok(await page.evaluate(() => played[0].toneHz > 1200 && played[0].toneHz < 1250), 'audio tones match received 1200 Hz, not an old fixed 1500 Hz');
@@ -139,14 +153,15 @@ const path = require('node:path');
     assert.equal(await card.locator('.exchange-slot').count(), 6);
     assert.match(await card.locator('.exchange-slot.received').first().innerText(), /CQ N0XYZ EM00/);
     assert.ok(Math.abs(await page.evaluate(() => outputGains.at(-1).gain.value) - 10**(-12/20)) < 0.0001);
-    await panel.getByLabel('TX audio attenuation', {exact:true}).fill('20');
+    await panel.getByLabel('TX level', {exact:true}).fill('20');
     await page.waitForFunction(() => Math.abs(outputGains.at(-1).gain.value - 0.1) < 0.0001);
     assert.equal(await page.evaluate(() => played.length), 1, 'live attenuation keeps the same transmission');
     assert.equal(await page.evaluate(() => rig.signals.at(-1).requestToSend), true);
 
     await page.waitForFunction(() => rig.signals.length >= 3 && rig.signals.at(-1).requestToSend === false, null, {timeout:18000});
     assert.equal(await page.evaluate(() => rig.closes), 0);
-    await panel.getByRole('status').filter({hasText:'FT8 audio complete'}).waitFor();
+    await panel.getByRole('status').filter({hasText:/audio completed; waiting for a reply/}).waitFor();
+    await card.getByText('Sent audio', {exact:true}).first().waitFor();
     const firstStart = await page.evaluate(() => played[0].utc);
     const nextStart = Math.round(firstStart/15000)*15000 + 30500;
     await page.evaluate(now => setUtc(now), nextStart - 1700);
@@ -160,14 +175,29 @@ const path = require('node:path');
     await page.waitForFunction(() => rig.signals.at(-1).requestToSend === false);
     assert.deepEqual(await panel.locator('.queued-station').evaluateAll(es=>es.map(e=>e.dataset.station)), ['K1ABC','N0XYZ']);
     await panel.locator('[data-station="N0XYZ"]').getByRole('button', {name:'Remove',exact:true}).click();
+    // Abort the procedural Control while the hardware key acknowledgment is
+    // pending. Its dropped transmit future must never start the scheduled PCM.
+    const thirdStart = nextStart + 30000;
+    const sentBeforeCancel = await page.evaluate(() => played.length);
+    await page.evaluate(now => { rig.holdKey = true; setUtc(now); }, thirdStart - 1700);
+    await send(thirdStart - 15000, ['CQ K1ABC FN42'], true);
+    await page.waitForFunction(() => typeof releaseKeyAck === 'function', null, {timeout:10000});
     await panel.getByRole('button', {name:'Stop contacting',exact:true}).click();
+    await page.evaluate(() => releaseKeyAck());
+    await page.waitForFunction(() => rig.signals.at(-1).requestToSend === false);
+    assert.equal(await page.evaluate(() => played.length), sentBeforeCancel,
+      'canceling the async Control during key ACK cannot play audio');
     await page.getByRole('button', {name:'Stop',exact:true}).click();
     await page.getByRole('status').filter({hasText:'Final FT8 decode complete'}).waitFor({timeout:60000});
     await page.reload();
-    assert.equal(await panel.getByLabel('My callsign',{exact:true}).inputValue(),'W9XYZ');
-    assert.equal(await panel.getByLabel('My grid',{exact:true}).inputValue(),'EN37');
-    assert.equal(await panel.getByLabel('TX audio attenuation',{exact:true}).inputValue(),'20');
-    assert.equal(await panel.getByLabel('Transmit audio output',{exact:true}).inputValue(),'radio-card');
+    await select('Contact configuration');
+    assert.equal(await page.getByLabel('My callsign',{exact:true}).inputValue(),'W9XYZ');
+    assert.equal(await page.getByLabel('My grid',{exact:true}).inputValue(),'EN37');
+    await select('Stations to contact');
+    assert.equal(await panel.getByLabel('TX level',{exact:true}).inputValue(),'20');
+    await select('Contact configuration');
+    assert.equal(await page.getByLabel('Transmit audio output',{exact:true}).inputValue(),'radio-card');
+    await select('Stations to contact');
     assert.equal(await panel.getByRole('button',{name:'Start contacting',exact:true}).isDisabled(),true);
     assert.deepEqual(errors, []);
     console.log('PASS: live output attenuation and saved level, queued exchange stages, sink suspension recovery, CQ priority, automatic replies, radio key/unkey and cancellation');

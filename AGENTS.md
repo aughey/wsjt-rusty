@@ -69,10 +69,13 @@ Keep the single root `Cargo.lock` and shared `target/` directory.
   arrival never refreshes CQ age. Selection is pure and does not consume a CQ.
   See `crates/conversations/README.md` for independent build/test commands.
 - `state-logic` (`crates/state-logic`): generic procedural async QSO logic.
-  `contact_stations` selects a CQ and awaits `finish_qso`; exchange progress and
-  retry budgets live on the async stack. `Conversation` supplies validated live
-  replies; `Control` supplies timing, cancel-safe transmit and logging. No runtime
-  or protocol dependencies. Browser/native adapters are not integrated yet.
+  The selected handle, suspended attempts and budgets live in the async stack;
+  `exchange` loops on `Conversation::last_reply` (including CQ), sends the response
+  and waits for RX. Newer earlier-stage replies may rewind the response. Selection
+  notifications flow to Control through `set_current_conversation`; no getter.
+  Browser Control executes supplied actions and publishes UI/log projections;
+  its queue is passive and cannot run the legacy QSO planner. Native contacting
+  retains its existing executor until separately migrated.
 - `wsjt-dsp` (`crates/dsp`): reusable signal processing, currently windowed-sinc
   downsampling to any equal or lower nonzero sample rate, with batch and stateful
   streaming APIs. No protocol or file I/O dependencies.
@@ -330,9 +333,9 @@ lag separately, keeping primary capture progress independent of recovery lag.
 ### Browser transmit audio
 
 Clicking or keyboard-activating a conversation moves its calling station into
-`transmit_ui.rs`'s expanded Stations to contact queue. The zero-dependency
-`ft8-conversations` manager owns contact decisions; `contact_queue.rs` executes them
-and owns bounded queue/log/resource state: 100 unique stations, 12 evidence messages each, FIFO among
+`transmit_ui.rs`'s expanded Stations to contact queue. The browser `state-logic`
+procedure owns contact decisions; the receive-only `ft8-conversations` types supply
+received facts. The queue is a passive list/display/log projection with bounds of 100 unique stations, 12 evidence messages each, FIFO among
 eligible fresh CQs, one active exchange. A station in another contact must wait
 for a fresh CQ. Never roll a stale CQ forward to a later slot.
 An exchange remains an attempt until a validated partner report or later-stage
@@ -560,6 +563,17 @@ navigation (arrows/Home/End), selection and panel labeling.
 
 ### Contact state transitions
 
+The browser's async procedure owns selection and budgets on its stack. Its
+`last_reply` loop responds to the latest validated partner frame, including CQ;
+newer earlier-stage messages can rewind the outgoing response without erasing
+heard evidence. Budget is local accounting only, seeded from completed receipts
+for resumption. Replacement exits exchange; the outer loop selects again.
+Successful closing audio completes the exchange via response metadata. Control receives
+one-way selection notifications and executes supplied actions. In browser passive
+mode, the queue's legacy planner/clock/completion/authorization methods are inert;
+its active/pending fields are display projections. Native execution still uses
+the legacy policy described below until separately migrated.
+
 `crates/conversations/src/session.rs` owns the `QsoState`/partner-evidence progression;
 `crates/conversations/src/manager.rs::decide` owns selection, slot turns,
 receive-completion gates and attempt budgets; the web `transmit.rs` re-exports
@@ -575,7 +589,7 @@ without rolling RX state back. Leave the last permitted transmission's receive
 window open before retry exhaustion. Keep exhaustive state/event coverage and
 queue timing regressions; see `docs/browser.md` for the event and slot guards.
 
-Clock-driven contact limits use `StationQueue::advance_time` before radio/output
+Native legacy clock-driven contact limits use `StationQueue::advance_time` before radio/output
 readiness gates, as well as inside `plan`. Four unanswered initial calls are
 counted from successful transmissions in the active Calling state; repeated CQs
 cannot reset that budget. Show the current attempt's calls out of four separately

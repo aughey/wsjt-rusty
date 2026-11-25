@@ -1,6 +1,9 @@
 //! CQ-triggered station queue, saved station settings, and output lifecycle.
 use crate::{contact_queue::StationQueue, radio::RadioControl};
+use futures_util::future::{AbortHandle, Abortable};
 use gloo_timers::callback::Interval;
+mod control;
+use control::{BrowserControl, BrowserConversations, FrameApproval};
 use leptos::prelude::*;
 use serde::Deserialize;
 use std::rc::Rc;
@@ -123,6 +126,13 @@ pub fn StationsToContact(
     open_frequency: ReadSignal<Option<(f64, f32)>>,
     playing: RwSignal<bool>,
 ) -> impl IntoView {
+    queue.update(|q| q.passive = true);
+    let conversations =
+        StoredValue::new_local(Rc::new(BrowserConversations::new(queue, mine, grid)));
+    Effect::new(move |_| {
+        queue.with(|q| q.observation_revision);
+        conversations.with_value(|c| c.refresh());
+    });
     let prefs = preferences();
     let find_open_frequency = RwSignal::new(prefs.find_open_frequency);
     let sort_state = RwSignal::new(prefs.sort_state);
@@ -190,6 +200,7 @@ pub fn StationsToContact(
     };
     let preparing = RwSignal::new(false);
     let current_plan = StoredValue::new_local(None::<u64>);
+    let approval = StoredValue::new_local(None::<FrameApproval>);
     let busy = RwSignal::new(false);
     let phase = RwSignal::new(String::new());
     let clock = RwSignal::new(js_sys::Date::now());
@@ -221,7 +232,11 @@ pub fn StationsToContact(
         id.is_finite()
             && id >= 1.0
             && id.fract() == 0.0
-            && queue.with_untracked(|q| q.can_transmit(id as u64))
+            && current_plan.get_value() == Some(id as u64)
+            && approval.with_value(|a| {
+                a.as_ref()
+                    .is_some_and(|a| a.plan.id == id as u64 && a.valid())
+            })
     }));
     let tx = StoredValue::new_local(create_transmitter(
         key.as_ref().as_ref().unchecked_ref(),
@@ -234,6 +249,23 @@ pub fn StationsToContact(
         tx.with_value(|tx| set_attenuation(tx, db));
     });
     let generation = StoredValue::new_local(0_u64);
+    let contact_task = StoredValue::new_local(None::<AbortHandle>);
+    let frequency_query_busy = RwSignal::new(false);
+    on_cleanup(move || {
+        if let Some(task) = contact_task.get_value() {
+            task.abort();
+        }
+    });
+    Effect::new(move |_| {
+        if !queue.with(|q| q.enabled)
+            && !preparing.get_untracked()
+            && let Some(task) = contact_task.get_value()
+        {
+            contact_task.set_value(None);
+            task.abort();
+            let _ = tx.with_value(stop_transmitter);
+        }
+    });
     let callbacks = StoredValue::new_local((key, release, available, validate));
     on_cleanup(move || {
         let promise = tx.with_value(dispose_transmitter);
@@ -249,12 +281,13 @@ pub fn StationsToContact(
     // the gap between the last 100 ms tick and the audio/PTT deadline.
     Effect::new(move |_| {
         let stale = queue.with(|q| {
-            q.pending
-                .as_ref()
-                .is_some_and(|p| js_sys::Date::now() < p.start_ms && !q.can_transmit(p.id))
+            q.pending.as_ref().is_some_and(|p| {
+                js_sys::Date::now() < p.start_ms
+                    && !approval.with_value(|a| a.as_ref().is_some_and(FrameApproval::valid))
+            })
         });
         if stale {
-            queue.update(|q| q.refresh_pending(js_sys::Date::now()));
+            queue.update(|q| q.pending = None);
             if current_plan.get_value().is_some() {
                 current_plan.set_value(None);
                 let _ = tx.with_value(cancel_current);
@@ -281,6 +314,9 @@ pub fn StationsToContact(
     });
     let stop_for_reason = move |reason: String| {
         generation.update_value(|g| *g += 1);
+        if let Some(task) = contact_task.get_value() {
+            task.abort();
+        }
         queue.update(|q| q.stop_with_reason(&reason));
         let _ = tx.with_value(stop_transmitter);
         playing.set(false);
@@ -327,6 +363,34 @@ pub fn StationsToContact(
                     status.set(
                         "Contacting enabled · waiting for a fresh CQ from a queued station.".into(),
                     );
+                    let (abort, registration) = AbortHandle::new_pair();
+                    contact_task.set_value(Some(abort));
+                    let mut control = BrowserControl {
+                        queue,
+                        radio,
+                        output_id,
+                        use_radio,
+                        open_frequency,
+                        frequency_query_busy,
+                        status,
+                        busy,
+                        current_plan,
+                        tx: tx.get_value(),
+                        conversations: conversations.get_value(),
+                        approval,
+                    };
+                    spawn_local(async move {
+                        let result = Abortable::new(
+                            state_logic::contact_stations(&mut control),
+                            registration,
+                        )
+                        .await;
+                        if let Ok(Err(reason)) = result
+                            && generation.try_with_value(|g| *g) == Some(gen_id)
+                        {
+                            stop_for_reason(reason);
+                        }
+                    });
                 }
                 Err(e) => status.set(format!(
                     "Could not prepare transmit audio: {}",
@@ -336,7 +400,6 @@ pub fn StationsToContact(
         });
     };
     let frequency_queries = StoredValue::new_local(std::collections::BTreeSet::<String>::new());
-    let frequency_query_busy = RwSignal::new(false);
     let timer = StoredValue::new_local(None::<Interval>);
     Effect::new(move |_| {
         timer.update_value(|timer| *timer = None);
@@ -355,37 +418,21 @@ pub fn StationsToContact(
             let active = tx.with_value(transmitter_busy);
             playing.set(tx.with_value(transmitter_playing));
             phase.set(tx.with_value(transmitter_phase));
-            queue.update(|q| q.refresh_pending(now));
-            if let Some(id) = current_plan.get_value() {
-                let still_pending =
-                    queue.with_untracked(|q| q.pending.as_ref().is_some_and(|p| p.id == id));
-                if !still_pending {
-                    let _ = tx.with_value(|tx| {
-                        if queue.with_untracked(|q| q.enabled) {
-                            cancel_current(tx)
-                        } else {
-                            stop_transmitter(tx)
-                        }
-                    });
-                    current_plan.set_value(None);
-                } else if !active {
-                    let success = tx.with_value(transmitter_outcome) == "complete";
-                    let reason = tx.with_value(transmitter_status);
-                    queue.update(|q| {
-                        if success {
-                            q.complete(id, true);
-                        } else if tx.with_value(transmitter_outcome) == "superseded" {
-                            q.revoke_pending(id);
-                        } else {
-                            q.fail(id, &reason);
-                        }
-                    });
-                    current_plan.set_value(None);
-                    status.set(reason);
-                }
+
+            if let Some(id) = current_plan.get_value()
+                && !queue.with_untracked(|q| q.pending.as_ref().is_some_and(|p| p.id == id))
+            {
+                let _ = tx.with_value(|tx| {
+                    if queue.with_untracked(|q| q.enabled) {
+                        cancel_current(tx)
+                    } else {
+                        stop_transmitter(tx)
+                    }
+                });
+                current_plan.set_value(None);
             }
-            // Clock-driven QSO limits must not depend on radio/query readiness.
-            queue.update(|q| q.advance_time(now));
+            // QSO limits and target selection belong to the async procedure.
+
             // Leave at least three seconds before the next slot's keying deadline.
             // Completed records survive queue removal and asynchronous persistence.
             if !active
@@ -412,89 +459,20 @@ pub fn StationsToContact(
                 }
             }
             busy.set(active);
-            if active
-                || frequency_query_busy.get_untracked()
-                || preparing.get_untracked()
-                || !queue.with_untracked(|q| q.enabled)
-            {
-                return;
-            }
-            if !running.get_untracked() {
-                stop();
-                return;
-            }
-            if !tx.with_value(transmitter_prepared) {
-                stop_for_reason(format!(
-                    "{} Click Start contacting to resume.",
-                    tx.with_value(transmitter_status)
-                ));
-                return;
-            }
-            if use_radio.get_untracked() {
-                if !radio.configured() {
+            // Presentation/housekeeping stays on the timer. The async Control
+            // owns all reservations, audio execution and completion accounting.
+            if queue.with_untracked(|q| q.enabled) && !preparing.get_untracked() {
+                if !running.get_untracked() {
+                    stop();
+                } else if !active && !tx.with_value(transmitter_prepared) {
+                    stop_for_reason(format!(
+                        "{} Click Start contacting to resume.",
+                        tx.with_value(transmitter_status)
+                    ));
+                } else if use_radio.get_untracked() && !radio.configured() {
                     stop_for_reason("Radio disconnected; contacting paused.".into());
-                    return;
-                }
-                if !radio.ready() {
-                    return;
                 }
             }
-            let mut plan = None;
-            queue.update(|q| {
-                q.open_frequency_hz = crate::open_frequency::recent_choice(
-                    open_frequency.get_untracked(),
-                    js_sys::Date::now(),
-                );
-                plan = q.plan(
-                    js_sys::Date::now(),
-                    &mine.get_untracked(),
-                    &grid.get_untracked(),
-                )
-            });
-            let Some(plan) = plan else {
-                return;
-            };
-            queue.update(|q| q.record_frequency(plan.id, radio.frequency()));
-            let samples = match transmit::audio(&plan.message, plan.frequency_hz) {
-                Ok(pcm) => pcm,
-                Err(e) => {
-                    queue.update(|q| q.fail(plan.id, e));
-                    status.set(e.into());
-                    return;
-                }
-            };
-            if use_radio.get_untracked()
-                && let Err(e) = radio.reserve()
-            {
-                queue.update(|q| q.fail(plan.id, &e));
-                status.set(e);
-                return;
-            }
-            let promise = tx.with_value(|tx| {
-                play_transmission(
-                    tx,
-                    &samples,
-                    plan.receive_slot as f64,
-                    &output_id.get_untracked(),
-                    use_radio.get_untracked(),
-                    plan.start_ms,
-                    plan.id as f64,
-                )
-            });
-            current_plan.set_value(Some(plan.id));
-            busy.set(true);
-            status.set(format!("{} · scheduled {}", plan.target, plan.message));
-            spawn_local(async move {
-                if let Err(e) = JsFuture::from(promise).await {
-                    if current_plan.try_with_value(|id| *id).flatten() != Some(plan.id) {
-                        return;
-                    }
-                    let reason = format!("Transmit paused: {}", error_text(e));
-                    queue.update(|q| q.fail(plan.id, &reason));
-                    current_plan.set_value(None);
-                    status.set(reason);
-                }
-            });
         })));
     });
     view! {
